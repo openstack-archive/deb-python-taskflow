@@ -1,0 +1,5 @@
+python-taskflow (0.1.2-1) unstable; urgency=low
+
+  * Initial release.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 24 Jan 2014 22:06:31 +0800

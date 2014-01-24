@@ -1,0 +1,26 @@
+#!/usr/bin/make -f
+
+UPSTREAM_GIT = git://github.com/stackforge/taskflow.git
+-include /usr/share/openstack-pkg-tools/pkgos.make
+
+%:
+	dh $@ --buildsystem=python_distutils --with python2
+
+override_dh_clean:
+	dh_clean -O--buildsystem=python_distutils
+	find . -iname '*.pyc' -delete
+
+ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
+override_dh_auto_test:
+	PYTHONPATH=. \
+	LANG=en_US.UTF-8 \
+	LANGUAGE=en_US:en \
+	LC_ALL=C \
+	NOSE_WITH_OPENSTACK=1 \
+	NOSE_OPENSTACK_COLOR=1 \
+	NOSE_OPENSTACK_RED=0.05 \
+	NOSE_OPENSTACK_YELLOW=0.025 \
+	NOSE_OPENSTACK_SHOW_ELAPSED=1 \
+	NOSE_OPENSTACK_STDOUT=1 \
+	nosetests --verbosity=2 || true
+endif
