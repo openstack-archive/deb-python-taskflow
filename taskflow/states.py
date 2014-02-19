@@ -28,7 +28,7 @@ UNCLAIMED = 'UNCLAIMED'
 
 # Flow states.
 FAILURE = FAILURE
-PENDING = 'PENDING'
+PENDING = PENDING
 REVERTING = 'REVERTING'
 REVERTED = 'REVERTED'
 RUNNING = RUNNING
@@ -112,7 +112,7 @@ def check_flow_transition(old_state, new_state):
 
     If transition can be performed, it returns True. If transition
     should be ignored, it returns False. If transition is not
-    valid, it raises InvalidStateException.
+    valid, it raises InvalidState exception.
     """
     if old_state == new_state:
         return False
@@ -121,8 +121,8 @@ def check_flow_transition(old_state, new_state):
         return True
     if pair in _IGNORED_FLOW_TRANSITIONS:
         return False
-    raise exc.InvalidStateException(
-        "Flow transition from %s to %s is not allowed" % pair)
+    raise exc.InvalidState("Flow transition from %s to %s is not allowed"
+                           % pair)
 
 
 ## Task state transitions
@@ -145,13 +145,13 @@ _ALLOWED_TASK_TRANSITIONS = frozenset((
     # NOTE(harlowja): allow the tasks to restart if in the same state
     # as a they were in before as a task may be 'killed' while in one of the
     # below states and it is permissible to let the task to re-enter that
-    # same state to try to finish
+    # same state to try to finish.
     (REVERTING, REVERTING),
     (RUNNING, RUNNING),
 
     # NOTE(harlowja): the task was 'killed' while in one of the starting/ending
     # states and it is permissible to let the task to start running or
-    # reverting again (if it really wants too)
+    # reverting again (if it really wants too).
     (REVERTING, RUNNING),
     (RUNNING, REVERTING),
 ))
@@ -166,7 +166,7 @@ _IGNORED_TASK_TRANSITIONS = [
 #
 # NOTE(harlowja): the above ALLOWED_TASK_TRANSITIONS does allow
 # transitions to certain equivalent states (but only for a few special
-# cases)
+# cases).
 _IGNORED_TASK_TRANSITIONS.extend(
     (a, a) for a in (PENDING, FAILURE, SUCCESS, REVERTED)
 )
@@ -179,7 +179,7 @@ def check_task_transition(old_state, new_state):
 
     If transition can be performed, it returns True. If transition
     should be ignored, it returns False. If transition is not
-    valid, it raises InvalidStateException.
+    valid, it raises InvalidState exception.
     """
     pair = (old_state, new_state)
     if pair in _ALLOWED_TASK_TRANSITIONS:
@@ -189,5 +189,5 @@ def check_task_transition(old_state, new_state):
     # TODO(harlowja): Should we check/allow for 3rd party states to be
     # triggered during RUNNING by having a concept of a sub-state that we also
     # verify against??
-    raise exc.InvalidStateException(
-        "Task transition from %s to %s is not allowed" % pair)
+    raise exc.InvalidState("Task transition from %s to %s is not allowed"
+                           % pair)

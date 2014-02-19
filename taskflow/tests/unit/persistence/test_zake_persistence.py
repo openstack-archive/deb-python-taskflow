@@ -2,7 +2,7 @@
 
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-#    Copyright (C) 2013 Rackspace Hosting All Rights Reserved.
+#    Copyright (C) 2014 AT&T Labs All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -18,27 +18,30 @@
 
 import contextlib
 
+from zake import fake_client
+
 from taskflow.persistence import backends
-from taskflow.persistence.backends import impl_memory
+from taskflow.persistence.backends import impl_zookeeper
 from taskflow import test
 from taskflow.tests.unit.persistence import base
 
 
-class MemoryPersistenceTest(test.TestCase, base.PersistenceTestMixin):
-    def setUp(self):
-        super(MemoryPersistenceTest, self).setUp()
-        self._backend = impl_memory.MemoryBackend({})
-
+class ZakePersistenceTest(test.TestCase, base.PersistenceTestMixin):
     def _get_connection(self):
         return self._backend.get_connection()
 
-    def tearDown(self):
-        conn = self._get_connection()
-        conn.clear_all()
-        self._backend = None
-        super(MemoryPersistenceTest, self).tearDown()
+    def setUp(self):
+        super(ZakePersistenceTest, self).setUp()
+        conf = {
+            "path": "/taskflow",
+        }
+        client = fake_client.FakeClient()
+        client.start()
+        self._backend = impl_zookeeper.ZkBackend(conf, client=client)
+        conn = self._backend.get_connection()
+        conn.upgrade()
 
-    def test_memory_persistence_entry_point(self):
-        conf = {'connection': 'memory:'}
+    def test_zk_persistence_entry_point(self):
+        conf = {'connection': 'zookeeper:'}
         with contextlib.closing(backends.fetch(conf)) as be:
-            self.assertIsInstance(be, impl_memory.MemoryBackend)
+            self.assertIsInstance(be, impl_zookeeper.ZkBackend)

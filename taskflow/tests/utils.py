@@ -17,7 +17,6 @@
 #    under the License.
 
 import contextlib
-import time
 
 import six
 
@@ -78,38 +77,26 @@ class ProvidesRequiresTask(task.Task):
 
 class SaveOrderTask(task.Task):
 
-    def __init__(self, values=None, name=None, sleep=None,
-                 *args, **kwargs):
+    def __init__(self, name=None, *args, **kwargs):
         super(SaveOrderTask, self).__init__(name=name, *args, **kwargs)
-        if values is None:
-            self.values = []
-        else:
-            self.values = values
-        self._sleep = sleep
+        self.values = EngineTestBase.values
 
     def execute(self, **kwargs):
         self.update_progress(0.0)
-        if self._sleep:
-            time.sleep(self._sleep)
         self.values.append(self.name)
         self.update_progress(1.0)
         return 5
 
     def revert(self, **kwargs):
         self.update_progress(0)
-        if self._sleep:
-            time.sleep(self._sleep)
         self.values.append(self.name + ' reverted(%s)'
                            % kwargs.get('result'))
         self.update_progress(1.0)
 
 
 class FailingTask(SaveOrderTask):
-
     def execute(self, **kwargs):
         self.update_progress(0)
-        if self._sleep:
-            time.sleep(self._sleep)
         self.update_progress(0.99)
         raise RuntimeError('Woot!')
 
@@ -120,6 +107,11 @@ class NastyTask(task.Task):
 
     def revert(self, **kwargs):
         raise RuntimeError('Gotcha!')
+
+
+class NastyFailingTask(NastyTask):
+    def execute(self, **kwargs):
+        raise RuntimeError('Woot!')
 
 
 class TaskNoRequiresNoReturns(task.Task):
@@ -212,16 +204,19 @@ class NeverRunningTask(task.Task):
 
 
 class EngineTestBase(object):
+    values = None
+
     def setUp(self):
         super(EngineTestBase, self).setUp()
-        self.values = []
+        EngineTestBase.values = []
         self.backend = impl_memory.MemoryBackend(conf={})
 
     def tearDown(self):
-        super(EngineTestBase, self).tearDown()
+        EngineTestBase.values = None
         with contextlib.closing(self.backend) as be:
             with contextlib.closing(be.get_connection()) as conn:
                 conn.clear_all()
+        super(EngineTestBase, self).tearDown()
 
     def _make_engine(self, flow, flow_detail=None):
         raise NotImplementedError()

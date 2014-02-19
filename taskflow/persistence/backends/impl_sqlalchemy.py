@@ -89,17 +89,17 @@ POSTGRES_CONN_ERRORS = (
     'could not connect to server',
 )
 POSTGRES_GONE_WAY_AWAY_ERRORS = (
-    # Server terminated while in progress (postgres errors are pretty weird)
+    # Server terminated while in progress (postgres errors are pretty weird).
     'server closed the connection unexpectedly',
     'terminating connection due to administrator command',
 )
 
-# These connection urls mean sqlite is being used as an in-memory DB
+# These connection urls mean sqlite is being used as an in-memory DB.
 SQLITE_IN_MEMORY = ('sqlite://', 'sqlite:///', 'sqlite:///:memory:')
 
 
 def _in_any(reason, err_haystack):
-    """Checks if any elements of the haystack are in the given reason"""
+    """Checks if any elements of the haystack are in the given reason."""
     for err in err_haystack:
         if reason.find(str(err)) != -1:
             return True
@@ -137,7 +137,7 @@ def _set_mode_traditional(dbapi_con, con_record, connection_proxy):
 def _ping_listener(dbapi_conn, connection_rec, connection_proxy):
     """Ensures that MySQL connections checked out of the pool are alive.
 
-    Modified + borrowed from: http://bit.ly/14BYaW6
+    Modified + borrowed from: http://bit.ly/14BYaW6.
     """
     try:
         dbapi_conn.cursor().execute('select 1')
@@ -153,53 +153,16 @@ def _ping_listener(dbapi_conn, connection_rec, connection_proxy):
 
 
 class SQLAlchemyBackend(base.Backend):
-    def __init__(self, conf):
+    def __init__(self, conf, engine=None):
         super(SQLAlchemyBackend, self).__init__(conf)
-        self._engine = None
+        if engine is not None:
+            self._engine = engine
+            self._owns_engine = False
+        else:
+            self._engine = None
+            self._owns_engine = True
         self._session_maker = None
-
-    def _test_connected(self, engine, max_retries=0):
-
-        def test_connect(failures):
-            try:
-                # See if we can make a connection happen.
-                #
-                # NOTE(harlowja): note that even though we are connecting
-                # once it does not mean that we will be able to connect in
-                # the future, so this is more of a sanity test and is not
-                # complete connection insurance.
-                with contextlib.closing(engine.connect()):
-                    pass
-            except sa_exc.OperationalError as ex:
-                if _is_db_connection_error(str(ex.args[0])):
-                    failures.append(misc.Failure())
-                    return False
-            return True
-
-        failures = []
-        if test_connect(failures):
-            return engine
-
-        # Sorry it didn't work out...
-        if max_retries <= 0:
-            failures[-1].reraise()
-
-        # Go through the exponential backoff loop and see if we can connect
-        # after a given number of backoffs (with a backoff sleeping period
-        # between each attempt)...
-        attempts_left = max_retries
-        for sleepy_secs in misc.ExponentialBackoff(max_retries):
-            LOG.warn("SQL connection failed due to '%s', %s attempts left.",
-                     failures[-1].exc, attempts_left)
-            LOG.info("Attempting to test the connection again in %s seconds.",
-                     sleepy_secs)
-            time.sleep(sleepy_secs)
-            if test_connect(failures):
-                return engine
-            attempts_left -= 1
-
-        # Sorry it didn't work out...
-        failures[-1].reraise()
+        self._validated = False
 
     def _create_engine(self):
         # NOTE(harlowja): copy the internal one so that we don't modify it via
@@ -218,7 +181,7 @@ class SQLAlchemyBackend(base.Backend):
         if 'sqlite' in e_url.drivername:
             engine_args["poolclass"] = sa_pool.NullPool
 
-            # Adjustments for in-memory sqlite usage
+            # Adjustments for in-memory sqlite usage.
             if sql_connection.lower().strip() in SQLITE_IN_MEMORY:
                 engine_args["poolclass"] = sa_pool.StaticPool
                 engine_args["connect_args"] = {'check_same_thread': False}
@@ -241,11 +204,7 @@ class SQLAlchemyBackend(base.Backend):
                 sa.event.listen(engine, 'checkout', _ping_listener)
             if misc.as_bool(conf.pop('mysql_traditional_mode', True)):
                 sa.event.listen(engine, 'checkout', _set_mode_traditional)
-        try:
-            max_retries = misc.as_int(conf.pop('max_retries', None))
-        except TypeError:
-            max_retries = 0
-        return self._test_connected(engine, max_retries=max_retries)
+        return engine
 
     @property
     def engine(self):
@@ -260,15 +219,30 @@ class SQLAlchemyBackend(base.Backend):
         return self._session_maker
 
     def get_connection(self):
-        return Connection(self, self._get_session_maker())
+        conn = Connection(self, self._get_session_maker())
+        if not self._validated:
+            try:
+                max_retries = misc.as_int(self._conf.get('max_retries', None))
+            except TypeError:
+                max_retries = 0
+            conn.validate(max_retries=max_retries)
+            self._validated = True
+        return conn
 
     def close(self):
         if self._session_maker is not None:
             self._session_maker.close_all()
-        if self._engine is not None:
+            self._session_maker = None
+        if self._engine is not None and self._owns_engine:
+            # NOTE(harlowja): Only dispose of the engine and clear it from
+            # our local state if we actually own the engine in the first
+            # place. If the user passed in their own engine we should not
+            # be disposing it on their behalf (and we shouldn't be clearing
+            # our local engine either, since then we would just recreate a
+            # new engine if the engine property is accessed).
             self._engine.dispose()
-        self._engine = None
-        self._session_maker = None
+            self._engine = None
+        self._validated = False
 
 
 class Connection(base.Connection):
@@ -280,6 +254,49 @@ class Connection(base.Connection):
     @property
     def backend(self):
         return self._backend
+
+    def validate(self, max_retries=0):
+
+        def test_connect(failures):
+            try:
+                # See if we can make a connection happen.
+                #
+                # NOTE(harlowja): note that even though we are connecting
+                # once it does not mean that we will be able to connect in
+                # the future, so this is more of a sanity test and is not
+                # complete connection insurance.
+                with contextlib.closing(self._engine.connect()):
+                    pass
+            except sa_exc.OperationalError as ex:
+                if _is_db_connection_error(str(ex.args[0])):
+                    failures.append(misc.Failure())
+                    return False
+            return True
+
+        failures = []
+        if test_connect(failures):
+            return
+
+        # Sorry it didn't work out...
+        if max_retries <= 0:
+            failures[-1].reraise()
+
+        # Go through the exponential backoff loop and see if we can connect
+        # after a given number of backoffs (with a backoff sleeping period
+        # between each attempt)...
+        attempts_left = max_retries
+        for sleepy_secs in misc.ExponentialBackoff(max_retries):
+            LOG.warn("SQL connection failed due to '%s', %s attempts left.",
+                     failures[-1].exc, attempts_left)
+            LOG.info("Attempting to test the connection again in %s seconds.",
+                     sleepy_secs)
+            time.sleep(sleepy_secs)
+            if test_connect(failures):
+                return
+            attempts_left -= 1
+
+        # Sorry it didn't work out...
+        failures[-1].reraise()
 
     def _run_in_session(self, functor, *args, **kwargs):
         """Runs a function in a session and makes sure that sqlalchemy

@@ -17,7 +17,7 @@
 #    under the License.
 
 
-"""Run examples as unit tests
+"""Run examples as unit tests.
 
 This module executes examples as unit tests, thus ensuring they at least
 can be executed with current taskflow. For examples with deterministic
@@ -52,10 +52,18 @@ def run_example(name):
     obj = subprocess.Popen([sys.executable, path],
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     output = obj.communicate()
-    if output[1]:
-        raise RuntimeError('Example wrote to stderr:\n%s'
-                           % output[1].decode())
-    return output[0].decode()
+    stdout = output[0].decode()
+    stderr = output[1].decode()
+
+    rc = obj.wait()
+    if rc != 0:
+        raise RuntimeError('Example %s failed, return code=%s\n'
+                           '<<<Begin captured STDOUT>>>\n%s'
+                           '<<<End captured STDOUT>>>\n'
+                           '<<<Begin captured STDERR>>>\n%s'
+                           '<<<End captured STDERR>>>'
+                           % (name, rc, stdout, stderr))
+    return stdout
 
 
 def expected_output_path(name):
@@ -67,7 +75,7 @@ def list_examples():
     for filename in os.listdir(examples_dir):
         name, ext = os.path.splitext(filename)
         if ext == ".py" and 'utils' not in name.lower():
-            yield filename[:-len(ext)]
+            yield name
 
 
 class ExamplesTestCase(taskflow.test.TestCase):
@@ -103,8 +111,8 @@ ExamplesTestCase.update()
 
 
 def make_output_files():
-    """Generate output files for all examples"""
-    for name in list_examples(False):
+    """Generate output files for all examples."""
+    for name in list_examples():
         output = run_example(name)
         with open(expected_output_path(name), 'w') as f:
             f.write(output)

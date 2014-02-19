@@ -16,9 +16,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import six
+
 
 class TaskFlowException(Exception):
     """Base class for exceptions emitted from this library."""
+    pass
+
+
+class ConnectionFailure(TaskFlowException):
+    """Raised when some type of connection can not be opened or is lost."""
     pass
 
 
@@ -45,24 +52,19 @@ class AlreadyExists(TaskFlowException):
     pass
 
 
-class ClosedException(TaskFlowException):
-    """Raised when an access on a closed object occurs."""
-    pass
-
-
-class InvalidStateException(TaskFlowException):
+class InvalidState(TaskFlowException):
     """Raised when a task/job/workflow is in an invalid state when an
     operation is attempting to apply to said task/job/workflow.
     """
     pass
 
 
-class InvariantViolationException(TaskFlowException):
+class InvariantViolation(TaskFlowException):
     """Raised when flow invariant violation is attempted."""
     pass
 
 
-class UnclaimableJobException(TaskFlowException):
+class UnclaimableJob(TaskFlowException):
     """Raised when a job can not be claimed."""
     pass
 
@@ -72,7 +74,7 @@ class JobNotFound(TaskFlowException):
     pass
 
 
-class MissingDependencies(InvalidStateException):
+class MissingDependencies(InvariantViolation):
     """Raised when a entity has dependencies that can not be satisfied."""
     message = ("%(who)s requires %(requirements)s but no other entity produces"
                " said requirements")
@@ -94,7 +96,7 @@ class EmptyFlow(TaskFlowException):
 
 
 class WrappedFailure(TaskFlowException):
-    """Wraps one or several failures
+    """Wraps one or several failures.
 
     When exception cannot be re-raised (for example, because
     the value and traceback is lost in serialization) or
@@ -106,17 +108,17 @@ class WrappedFailure(TaskFlowException):
         self._causes = []
         for cause in causes:
             if cause.check(type(self)) and cause.exception:
-                # NOTE(imelnikov): flatten wrapped failures
+                # NOTE(imelnikov): flatten wrapped failures.
                 self._causes.extend(cause.exception)
             else:
                 self._causes.append(cause)
 
     def __iter__(self):
-        """Iterate over failures that caused the exception"""
+        """Iterate over failures that caused the exception."""
         return iter(self._causes)
 
     def __len__(self):
-        """Return number of wrapped failures"""
+        """Return number of wrapped failures."""
         return len(self._causes)
 
     def check(self, *exc_classes):
@@ -136,4 +138,16 @@ class WrappedFailure(TaskFlowException):
         return None
 
     def __str__(self):
-        return 'WrappedFailure: %s' % [str(cause) for cause in self._causes]
+        causes = [exception_message(cause) for cause in self._causes]
+        return 'WrappedFailure: %s' % causes
+
+
+def exception_message(exc):
+    """Return the string representation of exception."""
+    # NOTE(imelnikov): Dealing with non-ascii data in python is difficult:
+    # https://bugs.launchpad.net/taskflow/+bug/1275895
+    # https://bugs.launchpad.net/taskflow/+bug/1276053
+    try:
+        return six.text_type(exc)
+    except UnicodeError:
+        return str(exc)

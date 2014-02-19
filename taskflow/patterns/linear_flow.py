@@ -37,15 +37,18 @@ class Flow(flow.Flow):
 
     def add(self, *items):
         """Adds a given task/tasks/flow/flows to this flow."""
+        if not items:
+            return self
+
         # NOTE(imelnikov): we add item to the end of flow, so it should
-        # not provide anything previous items of the flow require
+        # not provide anything previous items of the flow require.
         requires = self.requires
         provides = self.provides
         for item in items:
             requires |= item.requires
             out_of_order = requires & item.provides
             if out_of_order:
-                raise exceptions.InvariantViolationException(
+                raise exceptions.InvariantViolation(
                     "%(item)s provides %(oo)s that are required "
                     "by previous item(s) of linear flow %(flow)s"
                     % dict(item=item.name, flow=self.name,

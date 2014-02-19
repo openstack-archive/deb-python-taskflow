@@ -40,14 +40,18 @@ class Flow(flow.Flow):
 
     def add(self, *items):
         """Adds a given task/tasks/flow/flows to this flow."""
-        # check that items are actually independent
+        if not items:
+            return self
+
+        # NOTE(harlowja): check that items to be added are actually
+        # independent.
         provides = self.provides
         old_requires = self.requires
         for item in items:
             item_provides = item.provides
             bad_provs = item_provides & old_requires
             if bad_provs:
-                raise exceptions.InvariantViolationException(
+                raise exceptions.InvariantViolation(
                     "%(item)s provides %(oo)s that are required "
                     "by other item(s) of unordered flow %(flow)s"
                     % dict(item=item.name, flow=self.name,
@@ -65,7 +69,7 @@ class Flow(flow.Flow):
         for item in items:
             bad_reqs = provides & item.requires
             if bad_reqs:
-                raise exceptions.InvariantViolationException(
+                raise exceptions.InvariantViolation(
                     "%(item)s requires %(oo)s that are provided "
                     "by other item(s) of unordered flow %(flow)s"
                     % dict(item=item.name, flow=self.name,

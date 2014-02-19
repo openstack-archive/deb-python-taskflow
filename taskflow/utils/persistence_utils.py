@@ -20,6 +20,8 @@ import contextlib
 import copy
 import logging
 
+import six
+
 from taskflow.openstack.common import timeutils
 from taskflow.openstack.common import uuidutils
 from taskflow.persistence import logbook
@@ -86,13 +88,13 @@ def create_flow_detail(flow, book=None, backend=None, meta=None):
             with contextlib.closing(backend.get_connection()) as conn:
                 conn.save_logbook(book)
         # Return the one from the saved logbook instead of the local one so
-        # that the freshest version is given back
+        # that the freshest version is given back.
         return book.find(flow_id)
     else:
         return flow_detail
 
 
-def _copy_functon(deep_copy):
+def _copy_function(deep_copy):
     if deep_copy:
         return copy.deepcopy
     else:
@@ -110,9 +112,9 @@ def task_details_merge(td_e, td_new, deep_copy=False):
     if td_e is td_new:
         return td_e
 
-    copy_fn = _copy_functon(deep_copy)
+    copy_fn = _copy_function(deep_copy)
     if td_e.state != td_new.state:
-        # NOTE(imelnikov): states are just strings, no need to copy
+        # NOTE(imelnikov): states are just strings, no need to copy.
         td_e.state = td_new.state
     if td_e.results != td_new.results:
         td_e.results = copy_fn(td_new.results)
@@ -141,11 +143,11 @@ def flow_details_merge(fd_e, fd_new, deep_copy=False):
     if fd_e is fd_new:
         return fd_e
 
-    copy_fn = _copy_functon(deep_copy)
+    copy_fn = _copy_function(deep_copy)
     if fd_e.meta != fd_new.meta:
         fd_e.meta = copy_fn(fd_new.meta)
     if fd_e.state != fd_new.state:
-        # NOTE(imelnikov): states are just strings, no need to copy
+        # NOTE(imelnikov): states are just strings, no need to copy.
         fd_e.state = fd_new.state
     return fd_e
 
@@ -161,14 +163,14 @@ def logbook_merge(lb_e, lb_new, deep_copy=False):
     if lb_e is lb_new:
         return lb_e
 
-    copy_fn = _copy_functon(deep_copy)
+    copy_fn = _copy_function(deep_copy)
     if lb_e.meta != lb_new.meta:
         lb_e.meta = copy_fn(lb_new.meta)
     return lb_e
 
 
 def failure_to_dict(failure):
-    """Convert misc.Failure object to JSON-serializable dict"""
+    """Convert misc.Failure object to JSON-serializable dict."""
     if not failure:
         return None
     if not isinstance(failure, misc.Failure):
@@ -185,8 +187,7 @@ def failure_to_dict(failure):
 def failure_from_dict(data):
     """Restore misc.Failure object from dict.
 
-    The dict should be similar to what failure_to_dict() function
-    produces.
+    The dict should be similar to what failure_to_dict() function produces.
     """
     if not data:
         return None
@@ -227,7 +228,7 @@ def _format_shared(obj, indent):
 
 
 def pformat_task_detail(task_detail, indent=0):
-    """Pretty formats a task detail"""
+    """Pretty formats a task detail."""
     lines = ["%sTask: '%s'" % (" " * (indent), task_detail.name)]
     lines.extend(_format_shared(task_detail, indent=indent + 1))
     lines.append("%s- version = %s"
@@ -241,7 +242,7 @@ def pformat_task_detail(task_detail, indent=0):
 
 
 def pformat_flow_detail(flow_detail, indent=0):
-    """Pretty formats a flow detail"""
+    """Pretty formats a flow detail."""
     lines = ["%sFlow: '%s'" % (" " * indent, flow_detail.name)]
     lines.extend(_format_shared(flow_detail, indent=indent + 1))
     lines.extend(_format_meta(flow_detail.meta, indent=indent + 1))
@@ -251,7 +252,7 @@ def pformat_flow_detail(flow_detail, indent=0):
 
 
 def pformat(book, indent=0):
-    """Pretty formats a logbook"""
+    """Pretty formats a logbook."""
     lines = ["%sLogbook: '%s'" % (" " * indent, book.name)]
     lines.extend(_format_shared(book, indent=indent + 1))
     lines.extend(_format_meta(book.meta, indent=indent + 1))
@@ -266,3 +267,74 @@ def pformat(book, indent=0):
     for flow_detail in book:
         lines.append(pformat_flow_detail(flow_detail, indent=indent + 1))
     return "\n".join(lines)
+
+
+def _str_2_datetime(text):
+    """Converts an iso8601 string/text into a datetime object (or none)."""
+    if text is None:
+        return None
+    if not isinstance(text, six.string_types):
+        raise ValueError("Can only convert strings into a datetime object and"
+                         " not %r" % (text))
+    if not len(text):
+        return None
+    return timeutils.parse_isotime(text)
+
+
+def format_task_detail(td):
+    return {
+        'failure': failure_to_dict(td.failure),
+        'meta': td.meta,
+        'name': td.name,
+        'results': td.results,
+        'state': td.state,
+        'version': td.version,
+    }
+
+
+def unformat_task_detail(uuid, td_data):
+    td = logbook.TaskDetail(name=td_data['name'], uuid=uuid)
+    td.state = td_data.get('state')
+    td.results = td_data.get('results')
+    td.failure = failure_from_dict(td_data.get('failure'))
+    td.meta = td_data.get('meta')
+    td.version = td_data.get('version')
+    return td
+
+
+def format_flow_detail(fd):
+    return {
+        'name': fd.name,
+        'meta': fd.meta,
+        'state': fd.state,
+    }
+
+
+def unformat_flow_detail(uuid, fd_data):
+    fd = logbook.FlowDetail(name=fd_data['name'], uuid=uuid)
+    fd.state = fd_data.get('state')
+    fd.meta = fd_data.get('meta')
+    return fd
+
+
+def format_logbook(lb, created_at=None):
+    lb_data = {
+        'name': lb.name,
+        'meta': lb.meta,
+    }
+    if created_at:
+        lb_data['created_at'] = timeutils.isotime(at=created_at)
+        lb_data['updated_at'] = timeutils.isotime()
+    else:
+        lb_data['created_at'] = timeutils.isotime()
+        lb_data['updated_at'] = None
+    return lb_data
+
+
+def unformat_logbook(uuid, lb_data):
+    lb = logbook.LogBook(name=lb_data['name'],
+                         uuid=uuid,
+                         updated_at=_str_2_datetime(lb_data['updated_at']),
+                         created_at=_str_2_datetime(lb_data['created_at']))
+    lb.meta = lb_data.get('meta')
+    return lb

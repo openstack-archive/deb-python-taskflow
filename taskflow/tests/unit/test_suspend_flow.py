@@ -16,87 +16,38 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import time
-
 import testtools
 
 import taskflow.engines
 from taskflow import exceptions as exc
+from taskflow.listeners import base as lbase
 from taskflow.patterns import linear_flow as lf
 from taskflow import states
-from taskflow import task
 from taskflow import test
 from taskflow.tests import utils
 from taskflow.utils import eventlet_utils as eu
 
 
-class TestTask(task.Task):
+class SuspendingListener(lbase.ListenerBase):
 
-    def __init__(self, values=None, name=None, sleep=None,
-                 provides=None, rebind=None, requires=None):
-        super(TestTask, self).__init__(name=name, provides=provides,
-                                       rebind=rebind, requires=requires)
-        if values is None:
-            self.values = []
-        else:
-            self.values = values
-        self._sleep = sleep
+    def __init__(self, engine, task_name, task_state):
+        super(SuspendingListener, self).__init__(
+            engine, task_listen_for=(task_state,))
+        self._task_name = task_name
 
-    def execute(self, **kwargs):
-        self.update_progress(0.0)
-        if self._sleep:
-            time.sleep(self._sleep)
-        self.values.append(self.name)
-        self.update_progress(1.0)
-        return 5
-
-    def revert(self, **kwargs):
-        self.update_progress(0)
-        if self._sleep:
-            time.sleep(self._sleep)
-        self.values.append(self.name + ' reverted(%s)'
-                           % kwargs.get('result'))
-        self.update_progress(1.0)
-
-
-class FailingTask(TestTask):
-
-    def execute(self, **kwargs):
-        self.update_progress(0)
-        if self._sleep:
-            time.sleep(self._sleep)
-        self.update_progress(0.99)
-        raise RuntimeError('Woot!')
-
-
-class AutoSuspendingTask(TestTask):
-
-    def execute(self, engine):
-        result = super(AutoSuspendingTask, self).execute()
-        engine.suspend()
-        return result
-
-    def revert(self, engine, result, flow_failures):
-        super(AutoSuspendingTask, self).revert(**{'result': result})
-
-
-class AutoSuspendingTaskOnRevert(TestTask):
-
-    def execute(self, engine):
-        return super(AutoSuspendingTaskOnRevert, self).execute()
-
-    def revert(self, engine, result, flow_failures):
-        super(AutoSuspendingTaskOnRevert, self).revert(**{'result': result})
-        engine.suspend()
+    def _task_receiver(self, state, details):
+        if details['task_name'] == self._task_name:
+            self._engine.suspend()
 
 
 class SuspendFlowTest(utils.EngineTestBase):
 
     def test_suspend_one_task(self):
-        flow = AutoSuspendingTask(self.values, 'a')
+        flow = utils.SaveOrderTask('a')
         engine = self._make_engine(flow)
-        engine.storage.inject({'engine': engine})
-        engine.run()
+        with SuspendingListener(engine, task_name='b',
+                                task_state=states.SUCCESS):
+            engine.run()
         self.assertEqual(engine.storage.get_flow_state(), states.SUCCESS)
         self.assertEqual(self.values, ['a'])
         engine.run()
@@ -105,13 +56,14 @@ class SuspendFlowTest(utils.EngineTestBase):
 
     def test_suspend_linear_flow(self):
         flow = lf.Flow('linear').add(
-            TestTask(self.values, 'a'),
-            AutoSuspendingTask(self.values, 'b'),
-            TestTask(self.values, 'c')
+            utils.SaveOrderTask('a'),
+            utils.SaveOrderTask('b'),
+            utils.SaveOrderTask('c')
         )
         engine = self._make_engine(flow)
-        engine.storage.inject({'engine': engine})
-        engine.run()
+        with SuspendingListener(engine, task_name='b',
+                                task_state=states.SUCCESS):
+            engine.run()
         self.assertEqual(engine.storage.get_flow_state(), states.SUSPENDED)
         self.assertEqual(self.values, ['a', 'b'])
         engine.run()
@@ -120,13 +72,14 @@ class SuspendFlowTest(utils.EngineTestBase):
 
     def test_suspend_linear_flow_on_revert(self):
         flow = lf.Flow('linear').add(
-            TestTask(self.values, 'a'),
-            AutoSuspendingTaskOnRevert(self.values, 'b'),
-            FailingTask(self.values, 'c')
+            utils.SaveOrderTask('a'),
+            utils.SaveOrderTask('b'),
+            utils.FailingTask('c')
         )
         engine = self._make_engine(flow)
-        engine.storage.inject({'engine': engine})
-        engine.run()
+        with SuspendingListener(engine, task_name='b',
+                                task_state=states.REVERTED):
+            engine.run()
         self.assertEqual(engine.storage.get_flow_state(), states.SUSPENDED)
         self.assertEqual(
             self.values,
@@ -145,13 +98,15 @@ class SuspendFlowTest(utils.EngineTestBase):
 
     def test_suspend_and_resume_linear_flow_on_revert(self):
         flow = lf.Flow('linear').add(
-            TestTask(self.values, 'a'),
-            AutoSuspendingTaskOnRevert(self.values, 'b'),
-            FailingTask(self.values, 'c')
+            utils.SaveOrderTask('a'),
+            utils.SaveOrderTask('b'),
+            utils.FailingTask('c')
         )
         engine = self._make_engine(flow)
-        engine.storage.inject({'engine': engine})
-        engine.run()
+
+        with SuspendingListener(engine, task_name='b',
+                                task_state=states.REVERTED):
+            engine.run()
 
         # pretend we are resuming
         engine2 = self._make_engine(flow, engine.storage._flowdetail)
@@ -167,42 +122,46 @@ class SuspendFlowTest(utils.EngineTestBase):
 
     def test_suspend_and_revert_even_if_task_is_gone(self):
         flow = lf.Flow('linear').add(
-            TestTask(self.values, 'a'),
-            AutoSuspendingTaskOnRevert(self.values, 'b'),
-            FailingTask(self.values, 'c')
+            utils.SaveOrderTask('a'),
+            utils.SaveOrderTask('b'),
+            utils.FailingTask('c')
         )
         engine = self._make_engine(flow)
-        engine.storage.inject({'engine': engine})
-        engine.run()
+
+        with SuspendingListener(engine, task_name='b',
+                                task_state=states.REVERTED):
+            engine.run()
+
+        expected_values = ['a', 'b',
+                           'c reverted(Failure: RuntimeError: Woot!)',
+                           'b reverted(5)']
+        self.assertEqual(self.values, expected_values)
 
         # pretend we are resuming, but task 'c' gone when flow got updated
         flow2 = lf.Flow('linear').add(
-            TestTask(self.values, 'a'),
-            AutoSuspendingTaskOnRevert(self.values, 'b')
+            utils.SaveOrderTask('a'),
+            utils.SaveOrderTask('b')
         )
         engine2 = self._make_engine(flow2, engine.storage._flowdetail)
         self.assertRaisesRegexp(RuntimeError, '^Woot', engine2.run)
         self.assertEqual(engine2.storage.get_flow_state(), states.REVERTED)
-        self.assertEqual(
-            self.values,
-            ['a',
-             'b',
-             'c reverted(Failure: RuntimeError: Woot!)',
-             'b reverted(5)',
-             'a reverted(5)'])
+        expected_values.append('a reverted(5)')
+        self.assertEqual(self.values, expected_values)
 
     def test_storage_is_rechecked(self):
         flow = lf.Flow('linear').add(
-            AutoSuspendingTask(self.values, 'b'),
-            TestTask(self.values, name='c')
+            utils.SaveOrderTask('b', requires=['foo']),
+            utils.SaveOrderTask('c')
         )
         engine = self._make_engine(flow)
-        engine.storage.inject({'engine': engine, 'boo': True})
-        engine.run()
+        engine.storage.inject({'foo': 'bar'})
+        with SuspendingListener(engine, task_name='b',
+                                task_state=states.SUCCESS):
+            engine.run()
         self.assertEqual(engine.storage.get_flow_state(), states.SUSPENDED)
-        # uninject engine
+        # uninject everything:
         engine.storage.save(engine.storage.injector_name,
-                            None, states.FAILURE)
+                            {}, states.SUCCESS)
         self.assertRaises(exc.MissingDependencies, engine.run)
 
 

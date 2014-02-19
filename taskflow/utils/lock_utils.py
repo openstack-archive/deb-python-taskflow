@@ -21,6 +21,8 @@
 # pulls in oslo.cfg) and is reduced to only what taskflow currently wants to
 # use from that code.
 
+import collections
+import contextlib
 import errno
 import logging
 import os
@@ -28,9 +30,9 @@ import threading
 import time
 
 from taskflow.utils import misc
+from taskflow.utils import threading_utils as tu
 
 LOG = logging.getLogger(__name__)
-WAIT_TIME = 0.01
 
 
 def locked(*args, **kwargs):
@@ -63,6 +65,171 @@ def locked(*args, **kwargs):
             return decorator
 
 
+class ReaderWriterLock(object):
+    """A reader/writer lock.
+
+    This lock allows for simultaneous readers to exist but only one writer
+    to exist for use-cases where it is useful to have such types of locks.
+
+    Currently a reader can not escalate its read lock to a write lock and
+    a writer can not acquire a read lock while it owns or is waiting on
+    the write lock.
+
+    In the future these restrictions may be relaxed.
+    """
+    WRITER = 'w'
+    READER = 'r'
+
+    def __init__(self):
+        self._writer = None
+        self._pending_writers = collections.deque()
+        self._readers = collections.deque()
+        self._cond = threading.Condition()
+
+    @property
+    def pending_writers(self):
+        self._cond.acquire()
+        try:
+            return len(self._pending_writers)
+        finally:
+            self._cond.release()
+
+    def is_writer(self, check_pending=True):
+        """Returns if the caller is the active writer or a pending writer."""
+        self._cond.acquire()
+        try:
+            me = tu.get_ident()
+            if self._writer is not None and self._writer == me:
+                return True
+            if check_pending:
+                return me in self._pending_writers
+            else:
+                return False
+        finally:
+            self._cond.release()
+
+    @property
+    def owner(self):
+        """Returns whether the lock is locked by a writer or reader."""
+        self._cond.acquire()
+        try:
+            if self._writer is not None:
+                return self.WRITER
+            if self._readers:
+                return self.READER
+            return None
+        finally:
+            self._cond.release()
+
+    def is_reader(self):
+        """Returns if the caller is one of the readers."""
+        self._cond.acquire()
+        try:
+            return tu.get_ident() in self._readers
+        finally:
+            self._cond.release()
+
+    @contextlib.contextmanager
+    def read_lock(self):
+        """Grants a read lock.
+
+        Will wait until no active or pending writers.
+
+        Raises a RuntimeError if an active or pending writer tries to acquire
+        a read lock.
+        """
+        me = tu.get_ident()
+        if self.is_writer():
+            raise RuntimeError("Writer %s can not acquire a read lock"
+                               " while holding/waiting for the write lock"
+                               % me)
+        self._cond.acquire()
+        try:
+            while True:
+                # No active writer; we are good to become a reader.
+                if self._writer is None:
+                    self._readers.append(me)
+                    break
+                # An active writer; guess we have to wait.
+                self._cond.wait()
+        finally:
+            self._cond.release()
+        try:
+            yield self
+        finally:
+            # I am no longer a reader, remove *one* occurrence of myself.
+            # If the current thread acquired two read locks, then it will
+            # still have to remove that other read lock; this allows for
+            # basic reentrancy to be possible.
+            self._cond.acquire()
+            try:
+                self._readers.remove(me)
+                self._cond.notify_all()
+            finally:
+                self._cond.release()
+
+    @contextlib.contextmanager
+    def write_lock(self):
+        """Grants a write lock.
+
+        Will wait until no active readers. Blocks readers after acquiring.
+
+        Raises a RuntimeError if an active reader attempts to acquire a lock.
+        """
+        me = tu.get_ident()
+        if self.is_reader():
+            raise RuntimeError("Reader %s to writer privilege"
+                               " escalation not allowed" % me)
+        if self.is_writer(check_pending=False):
+            # Already the writer; this allows for basic reentrancy.
+            yield self
+        else:
+            self._cond.acquire()
+            try:
+                self._pending_writers.append(me)
+                while True:
+                    # No readers, and no active writer, am I next??
+                    if len(self._readers) == 0 and self._writer is None:
+                        if self._pending_writers[0] == me:
+                            self._writer = self._pending_writers.popleft()
+                            break
+                    self._cond.wait()
+            finally:
+                self._cond.release()
+            try:
+                yield self
+            finally:
+                self._cond.acquire()
+                try:
+                    self._writer = None
+                    self._cond.notify_all()
+                finally:
+                    self._cond.release()
+
+
+class DummyReaderWriterLock(object):
+    """A dummy reader/writer lock that doesn't lock anything but provides same
+    functions as a normal reader/writer lock class.
+    """
+    @contextlib.contextmanager
+    def write_lock(self):
+        yield self
+
+    @contextlib.contextmanager
+    def read_lock(self):
+        yield self
+
+    @property
+    def owner(self):
+        return None
+
+    def is_reader(self):
+        return False
+
+    def is_writer(self):
+        return False
+
+
 class MultiLock(object):
     """A class which can attempt to obtain many locks at once and release
     said locks when exiting.
@@ -77,10 +244,13 @@ class MultiLock(object):
         self._locked = [False] * len(locks)
 
     def __enter__(self):
+        self.acquire()
+
+    def acquire(self):
 
         def is_locked(lock):
-            # NOTE(harlowja): the threading2 lock doesn't seem to have this
-            # attribute, so that's why we are checking it existing first.
+            # NOTE(harlowja): reentrant locks (rlock) don't have this
+            # attribute, but normal non-reentrant locks do, how odd...
             if hasattr(lock, 'locked'):
                 return lock.locked()
             return False
@@ -90,10 +260,14 @@ class MultiLock(object):
                 raise threading.ThreadError("Lock %s not previously released"
                                             % (i + 1))
             self._locked[i] = False
+
         for (i, lock) in enumerate(self._locks):
             self._locked[i] = lock.acquire()
 
     def __exit__(self, type, value, traceback):
+        self.release()
+
+    def release(self):
         for (i, locked) in enumerate(self._locked):
             try:
                 if locked:
@@ -120,15 +294,17 @@ class _InterProcessLock(object):
     """
 
     def __init__(self, name):
-        self._lockfile = None
-        self._fname = name
+        self.lockfile = None
+        self.fname = name
 
-    @property
-    def path(self):
-        return self._fname
+    def acquire(self):
+        basedir = os.path.dirname(self.fname)
 
-    def __enter__(self):
-        self._lockfile = open(self.path, 'w')
+        if not os.path.exists(basedir):
+            misc.ensure_tree(basedir)
+            LOG.info('Created lock path: %s', basedir)
+
+        self.lockfile = open(self.fname, 'w')
 
         while True:
             try:
@@ -137,20 +313,38 @@ class _InterProcessLock(object):
                 # Also upon reading the MSDN docs for locking(), it seems
                 # to have a laughable 10 attempts "blocking" mechanism.
                 self.trylock()
-                return self
+                LOG.debug('Got file lock "%s"', self.fname)
+                return True
             except IOError as e:
                 if e.errno in (errno.EACCES, errno.EAGAIN):
-                    time.sleep(WAIT_TIME)
+                    # external locks synchronise things like iptables
+                    # updates - give it some time to prevent busy spinning
+                    time.sleep(0.01)
                 else:
-                    raise
+                    raise threading.ThreadError("Unable to acquire lock on"
+                                                " `%(filename)s` due to"
+                                                " %(exception)s" %
+                                                {
+                                                    'filename': self.fname,
+                                                    'exception': e,
+                                                })
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def release(self):
         try:
             self.unlock()
-            self._lockfile.close()
+            self.lockfile.close()
+            # This is fixed in: https://review.openstack.org/70506
+            LOG.debug('Released file lock "%s"', self.fname)
         except IOError:
             LOG.exception("Could not release the acquired lock `%s`",
-                          self.path)
+                          self.fname)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
 
     def trylock(self):
         raise NotImplementedError()
@@ -161,18 +355,18 @@ class _InterProcessLock(object):
 
 class _WindowsLock(_InterProcessLock):
     def trylock(self):
-        msvcrt.locking(self._lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+        msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_NBLCK, 1)
 
     def unlock(self):
-        msvcrt.locking(self._lockfile.fileno(), msvcrt.LK_UNLCK, 1)
+        msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 class _PosixLock(_InterProcessLock):
     def trylock(self):
-        fcntl.lockf(self._lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(self.lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def unlock(self):
-        fcntl.lockf(self._lockfile, fcntl.LOCK_UN)
+        fcntl.lockf(self.lockfile, fcntl.LOCK_UN)
 
 
 if os.name == 'nt':
