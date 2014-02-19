@@ -28,8 +28,9 @@ Build-depends-indep: alembic (>= 0.4.1),
                      python-sqlalchemy (>= 0.7.8),
                      python-stevedore (>= 0.12),
                      python-subunit (>= 0.0.18),
-                     python-testtools (>= 0.9.32),
+                     python-testtools (>= 0.9.34),
                      python-unittest2,
+                     python-zake,
                      testrepository (>= 0.0.17)
 Standards-Version: 3.9.4
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-taskflow.git
