@@ -22,9 +22,6 @@ Build-depends-indep: alembic (>= 0.4.1),
                      python-iso8601 (>= 0.1.8),
                      python-mock (>= 1.0),
                      python-networkx (>= 1.8),
-                     python-nose,
-                     python-nose-exclude,
-                     python-openstack.nose-plugin (>= 0.7),
                      python-six (>= 1.4.1),
                      python-sqlalchemy (>= 0.7.8),
                      python-stevedore (>= 0.12),
@@ -32,6 +29,7 @@ Build-depends-indep: alembic (>= 0.4.1),
                      python-testtools (>= 0.9.34),
                      python-unittest2,
                      python-zake,
+                     subunit (>= 0.0.18),
                      testrepository (>= 0.0.17)
 Standards-Version: 3.9.5
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-taskflow.git
