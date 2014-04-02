@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -21,6 +19,11 @@ import threading
 from concurrent import futures
 
 from taskflow.utils import eventlet_utils as eu
+
+DONE_STATES = frozenset([
+    futures._base.CANCELLED_AND_NOTIFIED,
+    futures._base.FINISHED,
+])
 
 
 class _Waiter(object):
@@ -43,10 +46,16 @@ class _Waiter(object):
         self.event.set()
 
 
-def _done_futures(fs):
-    return set(f for f in fs
-               if f._state in [futures._base.CANCELLED_AND_NOTIFIED,
-                               futures._base.FINISHED])
+def _partition_futures(fs):
+    """Partitions the input futures into done and not done lists."""
+    done = []
+    not_done = []
+    for f in fs:
+        if f._state in DONE_STATES:
+            done.append(f)
+        else:
+            not_done.append(f)
+    return (done, not_done)
 
 
 def wait_for_any(fs, timeout=None):
@@ -56,9 +65,9 @@ def wait_for_any(fs, timeout=None):
     Returns pair (done, not_done).
     """
     with futures._base._AcquireFutures(fs):
-        done = _done_futures(fs)
+        (done, not_done) = _partition_futures(fs)
         if done:
-            return done, set(fs) - done
+            return (done, not_done)
         is_green = any(isinstance(f, eu.GreenFuture) for f in fs)
         waiter = _Waiter(is_green)
         for f in fs:
@@ -69,8 +78,7 @@ def wait_for_any(fs, timeout=None):
         f._waiters.remove(waiter)
 
     with futures._base._AcquireFutures(fs):
-        done = _done_futures(fs)
-    return done, set(fs) - done
+        return _partition_futures(fs)
 
 
 def make_completed_future(result):

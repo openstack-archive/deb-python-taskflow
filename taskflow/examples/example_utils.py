@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -23,8 +21,9 @@ import shutil
 import sys
 import tempfile
 
+from six.moves import urllib_parse
+
 from taskflow import exceptions
-from taskflow.openstack.common.py3kcompat import urlutils
 from taskflow.persistence import backends
 
 LOG = logging.getLogger(__name__)
@@ -52,13 +51,19 @@ def rm_path(persist_path):
 
 
 def _make_conf(backend_uri):
-    parsed_url = urlutils.urlparse(backend_uri)
+    parsed_url = urllib_parse.urlparse(backend_uri)
     backend_type = parsed_url.scheme.lower()
     if not backend_type:
         raise ValueError("Unknown backend type for uri: %s" % (backend_type))
     if backend_type in ('file', 'dir'):
         conf = {
             'path': parsed_url.path,
+            'connection': backend_uri,
+        }
+    elif backend_type in ('zookeeper',):
+        conf = {
+            'path': parsed_url.path,
+            'hosts': parsed_url.netloc,
             'connection': backend_uri,
         }
     else:

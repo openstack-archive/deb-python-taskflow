@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -21,6 +19,7 @@ from taskflow.patterns import linear_flow as lf
 from taskflow.patterns import unordered_flow as uf
 
 from taskflow import exceptions
+from taskflow import retry
 from taskflow import test
 from taskflow.tests import utils
 
@@ -85,13 +84,6 @@ class FlowDependenciesTest(test.TestCase):
         self.assertEqual(flow.requires, set())
         self.assertEqual(flow.provides, set(['x', 'a', 'b', 'c']))
 
-    def test_linear_flow_provides_out_of_order(self):
-        flow = lf.Flow('lf')
-        self.assertRaises(exceptions.InvariantViolation,
-                          flow.add,
-                          utils.TaskOneArg('task2'),
-                          utils.TaskOneReturn('task1', provides='x'))
-
     def test_linear_flow_provides_required_values(self):
         flow = lf.Flow('lf').add(
             utils.TaskOneReturn('task1', provides='x'),
@@ -109,39 +101,12 @@ class FlowDependenciesTest(test.TestCase):
         self.assertEqual(flow.requires, set(['a', 'b', 'c', 'z']))
         self.assertEqual(flow.provides, set(['x', 'y', 'q', 'i', 'j', 'k']))
 
-    def test_linear_flow_self_requires(self):
-        flow = lf.Flow('lf')
-        self.assertRaises(exceptions.InvariantViolation,
-                          flow.add,
-                          utils.TaskNoRequiresNoReturns(rebind=['x'],
-                                                        provides='x'))
-
-    def test_linear_flow_provides_same_values(self):
-        flow = lf.Flow('lf').add(utils.TaskOneReturn(provides='x'))
-        self.assertRaises(exceptions.DependencyFailure,
-                          flow.add,
-                          utils.TaskOneReturn(provides='x'))
-
-    def test_linear_flow_provides_same_values_one_add(self):
-        flow = lf.Flow('lf')
-        self.assertRaises(exceptions.DependencyFailure,
-                          flow.add,
-                          utils.TaskOneReturn(provides='x'),
-                          utils.TaskOneReturn(provides='x'))
-
     def test_unordered_flow_without_dependencies(self):
         flow = uf.Flow('uf').add(
             utils.TaskNoRequiresNoReturns('task1'),
             utils.TaskNoRequiresNoReturns('task2'))
         self.assertEqual(flow.requires, set())
         self.assertEqual(flow.provides, set())
-
-    def test_unordered_flow_self_requires(self):
-        flow = uf.Flow('uf')
-        self.assertRaises(exceptions.InvariantViolation,
-                          flow.add,
-                          utils.TaskNoRequiresNoReturns(rebind=['x'],
-                                                        provides='x'))
 
     def test_unordered_flow_requires_values(self):
         flow = uf.Flow('uf').add(
@@ -166,7 +131,7 @@ class FlowDependenciesTest(test.TestCase):
 
     def test_unordered_flow_provides_required_values(self):
         flow = uf.Flow('uf')
-        self.assertRaises(exceptions.InvariantViolation,
+        self.assertRaises(exceptions.DependencyFailure,
                           flow.add,
                           utils.TaskOneReturn('task1', provides='x'),
                           utils.TaskOneArg('task2'))
@@ -174,14 +139,14 @@ class FlowDependenciesTest(test.TestCase):
     def test_unordered_flow_requires_provided_value_other_call(self):
         flow = uf.Flow('uf')
         flow.add(utils.TaskOneReturn('task1', provides='x'))
-        self.assertRaises(exceptions.InvariantViolation,
+        self.assertRaises(exceptions.DependencyFailure,
                           flow.add,
                           utils.TaskOneArg('task2'))
 
     def test_unordered_flow_provides_required_value_other_call(self):
         flow = uf.Flow('uf')
         flow.add(utils.TaskOneArg('task2'))
-        self.assertRaises(exceptions.InvariantViolation,
+        self.assertRaises(exceptions.DependencyFailure,
                           flow.add,
                           utils.TaskOneReturn('task1', provides='x'))
 
@@ -228,20 +193,6 @@ class FlowDependenciesTest(test.TestCase):
         self.assertRaises(exceptions.DependencyFailure,
                           flow.add,
                           gf.Flow('gf').add(utils.TaskOneReturn(provides='x')))
-
-    def test_graph_flow_without_dependencies(self):
-        flow = gf.Flow('gf').add(
-            utils.TaskNoRequiresNoReturns('task1'),
-            utils.TaskNoRequiresNoReturns('task2'))
-        self.assertEqual(flow.requires, set())
-        self.assertEqual(flow.provides, set())
-
-    def test_graph_flow_self_requires(self):
-        flow = gf.Flow('g-1-req-error')
-        self.assertRaisesRegexp(exceptions.DependencyFailure, '^No path',
-                                flow.add,
-                                utils.TaskOneArgOneReturn(requires=['a'],
-                                                          provides='a'))
 
     def test_graph_flow_requires_values(self):
         flow = gf.Flow('gf').add(
@@ -298,3 +249,180 @@ class FlowDependenciesTest(test.TestCase):
                                                           requires=['c']),
                                 utils.TaskOneArgOneReturn(provides='c',
                                                           requires=['a']))
+
+    def test_task_requires_and_provides_same_values(self):
+        self.assertRaises(exceptions.DependencyFailure,
+                          utils.TaskOneArgOneReturn,
+                          requires='a',
+                          provides='a')
+
+    def test_retry_in_linear_flow_no_requirements_no_provides(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt'))
+        self.assertEqual(flow.requires, set())
+        self.assertEqual(flow.provides, set())
+
+    def test_retry_in_linear_flow_with_requirements(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt', requires=['x', 'y']))
+        self.assertEqual(flow.requires, set(['x', 'y']))
+        self.assertEqual(flow.provides, set())
+
+    def test_retry_in_linear_flow_with_provides(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt', provides=['x', 'y']))
+        self.assertEqual(flow.requires, set())
+        self.assertEqual(flow.provides, set(['x', 'y']))
+
+    def test_retry_in_linear_flow_requires_and_provides(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt',
+                                                requires=['x', 'y'],
+                                                provides=['a', 'b']))
+        self.assertEqual(flow.requires, set(['x', 'y']))
+        self.assertEqual(flow.provides, set(['a', 'b']))
+
+    def test_retry_requires_and_provides_same_value(self):
+        self.assertRaises(exceptions.DependencyFailure,
+                          retry.AlwaysRevert,
+                          'rt', requires=['x', 'y'], provides=['x', 'y'])
+
+    def test_retry_in_unordered_flow_no_requirements_no_provides(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt'))
+        self.assertEqual(flow.requires, set())
+        self.assertEqual(flow.provides, set())
+
+    def test_retry_in_unordered_flow_with_requirements(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt', requires=['x', 'y']))
+        self.assertEqual(flow.requires, set(['x', 'y']))
+        self.assertEqual(flow.provides, set())
+
+    def test_retry_in_unordered_flow_with_provides(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt', provides=['x', 'y']))
+        self.assertEqual(flow.requires, set())
+        self.assertEqual(flow.provides, set(['x', 'y']))
+
+    def test_retry_in_unordered_flow_requires_and_provides(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt',
+                                                requires=['x', 'y'],
+                                                provides=['a', 'b']))
+        self.assertEqual(flow.requires, set(['x', 'y']))
+        self.assertEqual(flow.provides, set(['a', 'b']))
+
+    def test_retry_in_graph_flow_no_requirements_no_provides(self):
+        flow = gf.Flow('gf', retry.AlwaysRevert('rt'))
+        self.assertEqual(flow.requires, set())
+        self.assertEqual(flow.provides, set())
+
+    def test_retry_in_graph_flow_with_requirements(self):
+        flow = gf.Flow('gf', retry.AlwaysRevert('rt', requires=['x', 'y']))
+        self.assertEqual(flow.requires, set(['x', 'y']))
+        self.assertEqual(flow.provides, set())
+
+    def test_retry_in_graph_flow_with_provides(self):
+        flow = gf.Flow('gf', retry.AlwaysRevert('rt', provides=['x', 'y']))
+        self.assertEqual(flow.requires, set())
+        self.assertEqual(flow.provides, set(['x', 'y']))
+
+    def test_retry_in_graph_flow_requires_and_provides(self):
+        flow = gf.Flow('gf', retry.AlwaysRevert('rt',
+                                                requires=['x', 'y'],
+                                                provides=['a', 'b']))
+        self.assertEqual(flow.requires, set(['x', 'y']))
+        self.assertEqual(flow.provides, set(['a', 'b']))
+
+    def test_linear_flow_retry_and_task(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt',
+                                                requires=['x', 'y'],
+                                                provides=['a', 'b']))
+        flow.add(utils.TaskMultiArgOneReturn(rebind=['a', 'x', 'c'],
+                                             provides=['z']))
+
+        self.assertEqual(flow.requires, set(['x', 'y', 'c']))
+        self.assertEqual(flow.provides, set(['a', 'b', 'z']))
+
+    def test_linear_flow_retry_and_task_dependency_conflict(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt', requires=['x']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          utils.TaskOneReturn(provides=['x']))
+
+    def test_linear_flow_retry_and_task_provide_same_value(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt', provides=['x']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          utils.TaskOneReturn('t1', provides=['x']))
+
+    def test_unordered_flow_retry_and_task(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt',
+                                                requires=['x', 'y'],
+                                                provides=['a', 'b']))
+        flow.add(utils.TaskMultiArgOneReturn(rebind=['a', 'x', 'c'],
+                                             provides=['z']))
+
+        self.assertEqual(flow.requires, set(['x', 'y', 'c']))
+        self.assertEqual(flow.provides, set(['a', 'b', 'z']))
+
+    def test_unordered_flow_retry_and_task_dependency_conflict(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt', requires=['x']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          utils.TaskOneReturn(provides=['x']))
+
+    def test_unordered_flow_retry_and_task_provide_same_value(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt', provides=['x']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          utils.TaskOneReturn('t1', provides=['x']))
+
+    def test_unordered_flow_retry_two_tasks_provide_same_value(self):
+        flow = uf.Flow('uf', retry.AlwaysRevert('rt', provides=['y']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          utils.TaskOneReturn('t1', provides=['x']),
+                          utils.TaskOneReturn('t2', provides=['x']))
+
+    def test_graph_flow_retry_and_task(self):
+        flow = gf.Flow('gf', retry.AlwaysRevert('rt',
+                                                requires=['x', 'y'],
+                                                provides=['a', 'b']))
+        flow.add(utils.TaskMultiArgOneReturn(rebind=['a', 'x', 'c'],
+                                             provides=['z']))
+
+        self.assertEqual(flow.requires, set(['x', 'y', 'c']))
+        self.assertEqual(flow.provides, set(['a', 'b', 'z']))
+
+    def test_graph_flow_retry_and_task_dependency_conflict(self):
+        flow = gf.Flow('gf', retry.AlwaysRevert('rt', requires=['x']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          utils.TaskOneReturn(provides=['x']))
+
+    def test_graph_flow_retry_and_task_provide_same_value(self):
+        flow = gf.Flow('gf', retry.AlwaysRevert('rt', provides=['x']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          utils.TaskOneReturn('t1', provides=['x']))
+
+    def test_two_retries_provide_same_values_in_nested_flows(self):
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt1', provides=['x']))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          lf.Flow('lf1', retry.AlwaysRevert('rt2',
+                                                            provides=['x'])))
+
+    def test_two_retries_provide_same_values(self):
+        flow = lf.Flow('lf').add(
+            lf.Flow('lf1', retry.AlwaysRevert('rt1', provides=['x'])))
+        self.assertRaises(exceptions.DependencyFailure,
+                          flow.add,
+                          lf.Flow('lf2', retry.AlwaysRevert('rt2',
+                                                            provides=['x'])))
+
+    def test_builtin_retry_args(self):
+
+        class FullArgsRetry(retry.AlwaysRevert):
+            def execute(self, history, **kwargs):
+                pass
+
+            def revert(self, history, **kwargs):
+                pass
+
+        flow = lf.Flow('lf', retry=FullArgsRetry(requires='a'))
+        self.assertEqual(flow.requires, set(['a']))

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Rackspace Hosting All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -38,7 +36,12 @@ class MemoryPersistenceTest(test.TestCase, base.PersistenceTestMixin):
         self._backend = None
         super(MemoryPersistenceTest, self).tearDown()
 
-    def test_memory_persistence_entry_point(self):
+    def test_memory_backend_entry_point(self):
         conf = {'connection': 'memory:'}
+        with contextlib.closing(backends.fetch(conf)) as be:
+            self.assertIsInstance(be, impl_memory.MemoryBackend)
+
+    def test_memory_backend_fetch_by_name(self):
+        conf = {'connection': 'memory'}  # note no colon
         with contextlib.closing(backends.fetch(conf)) as be:
             self.assertIsInstance(be, impl_memory.MemoryBackend)

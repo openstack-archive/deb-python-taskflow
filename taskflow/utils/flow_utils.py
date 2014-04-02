@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,26 +15,22 @@
 #    under the License.
 
 import logging
-import threading
 
 import networkx as nx
 
 from taskflow import exceptions
-from taskflow.patterns import graph_flow as gf
-from taskflow.patterns import linear_flow as lf
-from taskflow.patterns import unordered_flow as uf
+from taskflow import flow
+from taskflow import retry
 from taskflow import task
 from taskflow.utils import graph_utils as gu
-from taskflow.utils import lock_utils as lu
 from taskflow.utils import misc
+
 
 LOG = logging.getLogger(__name__)
 
-# Use the 'flatten' attribute as the need to add an edge here, which is useful
-# for doing later analysis of the edges (to determine why the edges were
-# created).
-FLATTEN_EDGE_DATA = {
-    'flatten': True,
+
+RETRY_EDGE_DATA = {
+    'retry': True,
 }
 
 
@@ -46,19 +40,13 @@ class Flattener(object):
         self._graph = None
         self._history = set()
         self._freeze = bool(freeze)
-        self._lock = threading.Lock()
-        self._edge_data = FLATTEN_EDGE_DATA.copy()
 
-    def _add_new_edges(self, graph, nodes_from, nodes_to, edge_attrs=None):
+    def _add_new_edges(self, graph, nodes_from, nodes_to, edge_attrs):
         """Adds new edges from nodes to other nodes in the specified graph,
         with the following edge attributes (defaulting to the class provided
         edge_data if None), if the edge does not already exist.
         """
-        if edge_attrs is None:
-            edge_attrs = self._edge_data
-        else:
-            edge_attrs = edge_attrs.copy()
-            edge_attrs.update(self._edge_data)
+        nodes_to = list(nodes_to)
         for u in nodes_from:
             for v in nodes_to:
                 if not graph.has_edge(u, v):
@@ -78,46 +66,28 @@ class Flattener(object):
 
     def _find_flattener(self, item):
         """Locates the flattening function to use to flatten the given item."""
-        if isinstance(item, lf.Flow):
-            return self._flatten_linear
-        elif isinstance(item, uf.Flow):
-            return self._flatten_unordered
-        elif isinstance(item, gf.Flow):
-            return self._flatten_graph
+        if isinstance(item, flow.Flow):
+            return self._flatten_flow
         elif isinstance(item, task.BaseTask):
             return self._flatten_task
+        elif isinstance(item, retry.Retry):
+            raise TypeError("Retry controller %s (%s) is used not as a flow "
+                            "parameter" % (item, type(item)))
         else:
             return None
 
-    def _flatten_linear(self, flow):
-        """Flattens a linear flow."""
-        graph = nx.DiGraph(name=flow.name)
-        previous_nodes = []
-        for item in flow:
-            subgraph = self._flatten(item)
-            graph = gu.merge_graphs([graph, subgraph])
-            # Find nodes that have no predecessor, make them have a predecessor
-            # of the previous nodes so that the linearity ordering is
-            # maintained. Find the ones with no successors and use this list
-            # to connect the next subgraph (if any).
-            self._add_new_edges(graph,
-                                previous_nodes,
-                                list(gu.get_no_predecessors(subgraph)))
-            # There should always be someone without successors, otherwise we
-            # have a cycle A -> B -> A situation, which should not be possible.
-            previous_nodes = list(gu.get_no_successors(subgraph))
-        return graph
+    def _connect_retry(self, retry, graph):
+        graph.add_node(retry)
 
-    def _flatten_unordered(self, flow):
-        """Flattens a unordered flow."""
-        graph = nx.DiGraph(name=flow.name)
-        for item in flow:
-            # NOTE(harlowja): we do *not* connect the graphs together, this
-            # retains that each item (translated to subgraph) is disconnected
-            # from each other which will result in unordered execution while
-            # running.
-            graph = gu.merge_graphs([graph, self._flatten(item)])
-        return graph
+        # All graph nodes that have no predecessors should depend on its retry
+        nodes_to = [n for n in gu.get_no_predecessors(graph) if n != retry]
+        self._add_new_edges(graph, [retry], nodes_to, RETRY_EDGE_DATA)
+
+        # Add link to retry for each node of subgraph that hasn't
+        # a parent retry
+        for n in graph.nodes_iter():
+            if n != retry and 'retry' not in graph.node[n]:
+                graph.node[n]['retry'] = retry
 
     def _flatten_task(self, task):
         """Flattens a individual task."""
@@ -125,7 +95,7 @@ class Flattener(object):
         graph.add_node(task)
         return graph
 
-    def _flatten_graph(self, flow):
+    def _flatten_flow(self, flow):
         """Flattens a graph flow."""
         graph = nx.DiGraph(name=flow.name)
         # Flatten all nodes into a single subgraph per node.
@@ -134,16 +104,27 @@ class Flattener(object):
             subgraph = self._flatten(item)
             subgraph_map[item] = subgraph
             graph = gu.merge_graphs([graph, subgraph])
-        # Reconnect all node edges to there corresponding subgraphs.
-        for (u, v) in flow.graph.edges_iter():
-            # Retain and update the original edge attributes.
-            u_v_attrs = gu.get_edge_attrs(flow.graph, u, v)
-            # Connect the ones with no predecessors in v to the ones with no
-            # successors in u (thus maintaining the edge dependency).
-            self._add_new_edges(graph,
-                                list(gu.get_no_successors(subgraph_map[u])),
-                                list(gu.get_no_predecessors(subgraph_map[v])),
-                                edge_attrs=u_v_attrs)
+
+        # Reconnect all node edges to their corresponding subgraphs.
+        for (u, v, attrs) in flow.iter_links():
+            if any(attrs.get(k) for k in ('invariant', 'manual', 'retry')):
+                # Connect nodes with no predecessors in v to nodes with
+                # no successors in u (thus maintaining the edge dependency).
+                self._add_new_edges(graph,
+                                    gu.get_no_successors(subgraph_map[u]),
+                                    gu.get_no_predecessors(subgraph_map[v]),
+                                    edge_attrs=attrs)
+            else:
+                # This is dependency-only edge, connect corresponding
+                # providers and consumers.
+                for provider in subgraph_map[u]:
+                    for consumer in subgraph_map[v]:
+                        reasons = provider.provides & consumer.requires
+                        if reasons:
+                            graph.add_edge(provider, consumer, reasons=reasons)
+
+        if flow.retry is not None:
+            self._connect_retry(flow.retry, graph)
         return graph
 
     def _pre_item_flatten(self, item):
@@ -176,11 +157,10 @@ class Flattener(object):
                                             key=lambda node: node.name)
         if dup_names:
             dup_names = ', '.join(sorted(dup_names))
-            raise exceptions.InvariantViolation("Tasks with duplicate names "
-                                                "found: %s" % (dup_names))
+            raise exceptions.Duplicate("Tasks with duplicate names "
+                                       "found: %s" % (dup_names))
         self._history.clear()
 
-    @lu.locked
     def flatten(self):
         """Flattens a item (a task or flow) into a single execution graph."""
         if self._graph is not None:

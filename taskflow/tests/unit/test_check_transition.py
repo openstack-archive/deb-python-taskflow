@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -30,7 +28,8 @@ class TransitionTest(test.TestCase):
         self.assertFalse(self.check_transition(from_state, to_state))
 
     def assertTransitionForbidden(self, from_state, to_state):
-        self.assertRaisesRegexp(exc.InvalidState, self.transition_exc_regexp,
+        self.assertRaisesRegexp(exc.InvalidState,
+                                self.transition_exc_regexp,
                                 self.check_transition, from_state, to_state)
 
     def assertTransitions(self, from_state, allowed=None, ignored=None,
@@ -76,39 +75,46 @@ class CheckTaskTransitionTest(TransitionTest):
     def test_from_pending_state(self):
         self.assertTransitions(from_state=states.PENDING,
                                allowed=(states.RUNNING,),
-                               ignored=(states.PENDING, states.REVERTING),
-                               forbidden=(states.SUCCESS, states.FAILURE,
-                                          states.REVERTED))
+                               ignored=(states.PENDING, states.REVERTING,
+                                        states.SUCCESS, states.FAILURE,
+                                        states.REVERTED))
 
     def test_from_running_state(self):
         self.assertTransitions(from_state=states.RUNNING,
-                               allowed=(states.RUNNING, states.SUCCESS,
-                                        states.FAILURE, states.REVERTING),
-                               forbidden=(states.PENDING, states.REVERTED))
+                               allowed=(states.SUCCESS, states.FAILURE,),
+                               ignored=(states.REVERTING, states.RUNNING,
+                                        states.PENDING, states.REVERTED))
 
     def test_from_success_state(self):
         self.assertTransitions(from_state=states.SUCCESS,
-                               allowed=(states.REVERTING,),
-                               ignored=(states.RUNNING, states.SUCCESS),
-                               forbidden=(states.PENDING, states.FAILURE,
-                                          states.REVERTED))
+                               allowed=(states.REVERTING, states.RETRYING),
+                               ignored=(states.RUNNING, states.SUCCESS,
+                                        states.PENDING, states.FAILURE,
+                                        states.REVERTED))
 
     def test_from_failure_state(self):
         self.assertTransitions(from_state=states.FAILURE,
                                allowed=(states.REVERTING,),
-                               ignored=(states.FAILURE,),
-                               forbidden=(states.PENDING, states.RUNNING,
-                                          states.SUCCESS, states.REVERTED))
+                               ignored=(states.FAILURE, states.RUNNING,
+                                        states.PENDING,
+                                        states.SUCCESS, states.REVERTED))
 
     def test_from_reverting_state(self):
         self.assertTransitions(from_state=states.REVERTING,
-                               allowed=(states.RUNNING, states.FAILURE,
-                                        states.REVERTING, states.REVERTED),
-                               forbidden=(states.PENDING, states.SUCCESS))
+                               allowed=(states.FAILURE, states.REVERTED),
+                               ignored=(states.RUNNING, states.REVERTING,
+                                        states.PENDING, states.SUCCESS))
 
     def test_from_reverted_state(self):
         self.assertTransitions(from_state=states.REVERTED,
                                allowed=(states.PENDING,),
-                               ignored=(states.REVERTING, states.REVERTED),
-                               forbidden=(states.RUNNING, states.SUCCESS,
-                                          states.FAILURE))
+                               ignored=(states.REVERTING, states.REVERTED,
+                                        states.RUNNING,
+                                        states.SUCCESS, states.FAILURE))
+
+    def test_from_retrying_state(self):
+        self.assertTransitions(from_state=states.RETRYING,
+                               allowed=(states.RUNNING,),
+                               ignored=(states.RETRYING, states.SUCCESS,
+                                        states.PENDING, states.FAILURE,
+                                        states.REVERTED))

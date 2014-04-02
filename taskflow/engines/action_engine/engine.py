@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -21,11 +19,13 @@ import threading
 from taskflow.engines.action_engine import executor
 from taskflow.engines.action_engine import graph_action
 from taskflow.engines.action_engine import graph_analyzer
+from taskflow.engines.action_engine import retry_action
 from taskflow.engines.action_engine import task_action
 from taskflow.engines import base
 
 from taskflow import exceptions as exc
 from taskflow.openstack.common import excutils
+from taskflow import retry
 from taskflow import states
 from taskflow import storage as t_storage
 
@@ -52,6 +52,7 @@ class ActionEngine(base.EngineBase):
     _graph_analyzer_cls = graph_analyzer.GraphAnalyzer
     _task_action_cls = task_action.TaskAction
     _task_executor_cls = executor.SerialTaskExecutor
+    _retry_action_cls = retry_action.RetryAction
 
     def __init__(self, flow, flow_detail, backend, conf):
         super(ActionEngine, self).__init__(flow, flow_detail, backend, conf)
@@ -62,53 +63,37 @@ class ActionEngine(base.EngineBase):
         self._state_lock = threading.RLock()
         self._task_executor = None
         self._task_action = None
-
-    def _revert(self, current_failure=None):
-        self._change_state(states.REVERTING)
-        try:
-            state = self._root.revert()
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                self._change_state(states.FAILURE)
-
-        self._change_state(state)
-        if state == states.SUSPENDED:
-            return
-        failures = self.storage.get_failures()
-        misc.Failure.reraise_if_any(failures.values())
-        if current_failure:
-            current_failure.reraise()
+        self._retry_action = None
+        self._storage_ensured = False
 
     def __str__(self):
         return "%s: %s" % (reflection.get_class_name(self), id(self))
 
     def suspend(self):
         if not self._compiled:
-            raise exc.InvariantViolation("Can not suspend an engine"
-                                         " which has not been compiled")
+            raise exc.InvalidState("Can not suspend an engine"
+                                   " which has not been compiled")
         self._change_state(states.SUSPENDING)
 
     @property
     def execution_graph(self):
-        self.compile()
-        return self._analyzer.execution_graph
+        """The graph of nodes to be executed.
+
+        NOTE(harlowja): Only accessible after compilation has completed.
+        """
+        g = None
+        if self._compiled and self._analyzer:
+            g = self._analyzer.execution_graph
+        return g
 
     @lock_utils.locked
     def run(self):
         """Runs the flow in the engine to completion."""
-        if self.storage.get_flow_state() == states.REVERTED:
-            self._reset()
         self.compile()
-        external_provides = set(self.storage.fetch_all().keys())
-        missing = self._flow.requires - external_provides
-        if missing:
-            raise exc.MissingDependencies(self._flow, sorted(missing))
+        self.prepare()
         self._task_executor.start()
         try:
-            if self.storage.has_failures():
-                self._revert()
-            else:
-                self._run()
+            self._run()
         finally:
             self._task_executor.stop()
 
@@ -117,10 +102,13 @@ class ActionEngine(base.EngineBase):
         try:
             state = self._root.execute()
         except Exception:
-            self._change_state(states.FAILURE)
-            self._revert(misc.Failure())
+            with excutils.save_and_reraise_exception():
+                self._change_state(states.FAILURE)
         else:
             self._change_state(state)
+        if state != states.SUSPENDED and state != states.SUCCESS:
+            failures = self.storage.get_failures()
+            misc.Failure.reraise_if_any(failures.values())
 
     @lock_utils.locked(lock='_state_lock')
     def _change_state(self, state):
@@ -143,33 +131,48 @@ class ActionEngine(base.EngineBase):
                        old_state=old_state)
         self.notifier.notify(state, details)
 
-    def _reset(self):
-        for name, uuid in self.storage.reset_tasks():
-            details = dict(engine=self,
-                           task_name=name,
-                           task_uuid=uuid,
-                           result=None)
-            self.task_notifier.notify(states.PENDING, details)
-        self._change_state(states.PENDING)
-
-    def _ensure_storage_for(self, task_graph):
+    def _ensure_storage_for(self, execution_graph):
         # NOTE(harlowja): signal to the tasks that exist that we are about to
         # resume, if they have a previous state, they will now transition to
         # a resuming state (and then to suspended).
         self._change_state(states.RESUMING)  # does nothing in PENDING state
-        for task in task_graph.nodes_iter():
-            task_version = misc.get_version_string(task)
-            self.storage.ensure_task(task.name, task_version, task.save_as)
+        for node in execution_graph.nodes_iter():
+            version = misc.get_version_string(node)
+            if isinstance(node, retry.Retry):
+                self.storage.ensure_retry(node.name, version, node.save_as)
+            else:
+                self.storage.ensure_task(node.name, version, node.save_as)
         self._change_state(states.SUSPENDED)  # does nothing in PENDING state
+
+    @lock_utils.locked
+    def prepare(self):
+        if not self._compiled:
+            raise exc.InvalidState("Can not prepare an engine"
+                                   " which has not been compiled")
+        if not self._storage_ensured:
+            self._ensure_storage_for(self.execution_graph)
+            self._storage_ensured = True
+        # At this point we can check to ensure all dependencies are either
+        # flow/task provided or storage provided, if there are still missing
+        # dependencies then this flow will fail at runtime (which we can avoid
+        # by failing at preparation time).
+        external_provides = set(self.storage.fetch_all().keys())
+        missing = self._flow.requires - external_provides
+        if missing:
+            raise exc.MissingDependencies(self._flow, sorted(missing))
+        # Reset everything back to pending (if we were previously reverted).
+        if self.storage.get_flow_state() == states.REVERTED:
+            self._root.reset_all()
+            self._change_state(states.PENDING)
 
     @lock_utils.locked
     def compile(self):
         if self._compiled:
             return
-        task_graph = flow_utils.flatten(self._flow)
-        if task_graph.number_of_nodes() == 0:
-            raise exc.EmptyFlow("Flow %s is empty." % self._flow.name)
-        self._analyzer = self._graph_analyzer_cls(task_graph,
+        execution_graph = flow_utils.flatten(self._flow)
+        if execution_graph.number_of_nodes() == 0:
+            raise exc.Empty("Flow %s is empty." % self._flow.name)
+        self._analyzer = self._graph_analyzer_cls(execution_graph,
                                                   self.storage)
         if self._task_executor is None:
             self._task_executor = self._task_executor_cls()
@@ -177,16 +180,15 @@ class ActionEngine(base.EngineBase):
             self._task_action = self._task_action_cls(self.storage,
                                                       self._task_executor,
                                                       self.task_notifier)
+        if self._retry_action is None:
+            self._retry_action = self._retry_action_cls(self.storage,
+                                                        self.task_notifier)
         self._root = self._graph_action_cls(self._analyzer,
                                             self.storage,
-                                            self._task_action)
-        # NOTE(harlowja): Perform initial state manipulation and setup.
-        #
-        # TODO(harlowja): This doesn't seem like it should be in a compilation
-        # function since compilation seems like it should not modify any
-        # external state.
-        self._ensure_storage_for(task_graph)
+                                            self._task_action,
+                                            self._retry_action)
         self._compiled = True
+        return
 
 
 class SingleThreadedActionEngine(ActionEngine):

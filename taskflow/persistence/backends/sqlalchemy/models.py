@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #    Copyright (C) 2013 Rackspace Hosting Inc. All Rights Reserved.
 #
@@ -17,7 +15,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from sqlalchemy import Column, String, DateTime
+from sqlalchemy import Column, String, DateTime, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import backref
@@ -28,7 +26,8 @@ from taskflow.openstack.common import jsonutils
 from taskflow.openstack.common import timeutils
 from taskflow.openstack.common import uuidutils
 
-from taskflow.utils import persistence_utils
+from taskflow.persistence import logbook
+from taskflow import states
 
 BASE = declarative_base()
 
@@ -47,27 +46,6 @@ class Json(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         return jsonutils.loads(value)
-
-
-class Failure(types.TypeDecorator):
-    """Put misc.Failure object into database column.
-
-    We convert Failure object to dict, serialize that dict into
-    JSON and save it. None is stored as NULL.
-
-    The conversion is lossy since we cannot save exc_info.
-    """
-    impl = types.Text
-
-    def process_bind_param(self, value, dialect):
-        if value is None:
-            return None
-        return jsonutils.dumps(persistence_utils.failure_to_dict(value))
-
-    def process_result_value(self, value, dialect):
-        if value is None:
-            return None
-        return persistence_utils.failure_from_dict(jsonutils.loads(value))
 
 
 class ModelBase(TimestampMixin):
@@ -98,21 +76,23 @@ class FlowDetail(BASE, ModelBase):
 
     # Relationships
     parent_uuid = Column(String, ForeignKey('logbooks.uuid'))
-    taskdetails = relationship("TaskDetail",
+    atomdetails = relationship("AtomDetail",
                                single_parent=True,
                                backref=backref("flowdetails",
                                                cascade="save-update, delete, "
                                                        "merge"))
 
 
-class TaskDetail(BASE, ModelBase):
-    __tablename__ = 'taskdetails'
+class AtomDetail(BASE, ModelBase):
+    __tablename__ = 'atomdetails'
 
     # Member variables
+    atom_type = Column(Enum(*logbook.ATOM_TYPES, name='atom_types'))
     state = Column(String)
+    intention = Column(Enum(*states.INTENTIONS, name='intentions'))
     results = Column(Json)
-    failure = Column(Failure)
-    version = Column(String)
+    failure = Column(Json)
+    version = Column(Json)
 
     # Relationships
     parent_uuid = Column(String, ForeignKey('flowdetails.uuid'))

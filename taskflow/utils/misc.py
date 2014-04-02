@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #    Copyright (C) 2013 Rackspace Hosting All Rights Reserved.
 #
@@ -18,6 +16,7 @@
 #    under the License.
 
 import collections
+import contextlib
 import copy
 import errno
 import functools
@@ -26,6 +25,7 @@ import logging
 import os
 import string
 import sys
+import threading
 import time
 import traceback
 
@@ -122,6 +122,22 @@ def get_version_string(obj):
     return obj_version
 
 
+def sequence_minus(seq1, seq2):
+    """Calculate difference of two sequences.
+
+    Result contains the elements from first sequence that are not
+    present in second sequence, in original order. Works even
+    if sequence elements are not hashable.
+    """
+    result = list(seq1)
+    for item in seq2:
+        try:
+            result.remove(item)
+        except ValueError:
+            pass
+    return result
+
+
 def item_from(container, index, name=None):
     """Attempts to fetch a index/key from a given container."""
     if index is None:
@@ -211,6 +227,31 @@ class AttrDict(dict):
         self[name] = value
 
 
+class Timeout(object):
+    """An object which represents a timeout.
+
+    This object has the ability to be interrupted before the actual timeout
+    is reached.
+    """
+    def __init__(self, timeout):
+        if timeout < 0:
+            raise ValueError("Timeout must be >= 0 and not %s" % (timeout))
+        self._timeout = timeout
+        self._event = threading.Event()
+
+    def interrupt(self):
+        self._event.set()
+
+    def is_stopped(self):
+        return self._event.is_set()
+
+    def wait(self):
+        self._event.wait(self._timeout)
+
+    def reset(self):
+        self._event.clear()
+
+
 class ExponentialBackoff(object):
     """An iterable object that will yield back an exponential delay sequence
     provided an exponent and a number of items to yield. This object may be
@@ -232,7 +273,7 @@ class ExponentialBackoff(object):
 
 
 def as_bool(val):
-    """Converts an arbitary value into a boolean."""
+    """Converts an arbitrary value into a boolean."""
     if isinstance(val, bool):
         return val
     if isinstance(val, six.string_types):
@@ -371,6 +412,7 @@ class TransitionNotifier(object):
         return count
 
     def is_registered(self, state, callback):
+        """Check if a callback is registered."""
         listeners = list(self._listeners.get(state, []))
         for (cb, _args, _kwargs) in listeners:
             if reflection.is_same_callback(cb, callback):
@@ -378,9 +420,18 @@ class TransitionNotifier(object):
         return False
 
     def reset(self):
+        """Forget all previously registered callbacks."""
         self._listeners.clear()
 
     def notify(self, state, details):
+        """Notify about state change.
+
+        All callbacks registered to receive notifications about given
+        state will be called.
+
+        :param state: state we moved to
+        :param details: addition transition details
+        """
         listeners = list(self._listeners.get(self.ANY, []))
         for i in self._listeners[state]:
             if i not in listeners:
@@ -396,10 +447,19 @@ class TransitionNotifier(object):
             try:
                 callback(state, *args, **kwargs)
             except Exception:
-                LOG.exception(("Failure calling callback %s to notify about"
-                               " state transition %s"), callback, state)
+                LOG.warn("Failure calling callback %s to notify about state"
+                         " transition %s, details: %s",
+                         callback, state, details, exc_info=True)
 
     def register(self, state, callback, args=None, kwargs=None):
+        """Register a callback to be called when state is changed.
+
+        Callback will be called with provided ``args`` and ``kwargs`` and
+        when state is changed to ``state`` (or on any state change if
+        ``state`` equals to ``TransitionNotifier.ANY``). It will also
+        get additional keyword argument, ``details``, that will hold
+        transition details provided to :py:meth:`notify` method.
+        """
         assert six.callable(callback), "Callback must be callable"
         if self.is_registered(state, callback):
             raise ValueError("Callback %s already registered" % (callback))
@@ -414,6 +474,7 @@ class TransitionNotifier(object):
         self._listeners[state].append((callback, args, kwargs))
 
     def deregister(self, state, callback):
+        """Remove callback from listening to state ``state``."""
         if state not in self._listeners:
             return
         for i, (cb, args, kwargs) in enumerate(self._listeners[state]):
@@ -454,12 +515,42 @@ def are_equal_exc_info_tuples(ei1, ei2):
     return tb1 == tb2
 
 
+@contextlib.contextmanager
+def capture_failure():
+    """Save current exception, and yield back the failure (or raises a
+    runtime error if no active exception is being handled).
+
+    In some cases the exception context can be cleared, resulting in None
+    being attempted to be saved after an exception handler is run. This
+    can happen when eventlet switches greenthreads or when running an
+    exception handler, code raises and catches an exception. In both
+    cases the exception context will be cleared.
+
+    To work around this, we save the exception state, yield a failure and
+    then run other code.
+
+    For example::
+
+      except Exception:
+        with capture_failure() as fail:
+            LOG.warn("Activating cleanup")
+            cleanup()
+            save_failure(fail)
+    """
+    exc_info = sys.exc_info()
+    if not any(exc_info):
+        raise RuntimeError("No active exception is being handled")
+    else:
+        yield Failure(exc_info=exc_info)
+
+
 class Failure(object):
     """Object that represents failure.
 
     Failure objects encapsulate exception information so that
     it can be re-used later to re-raise or inspect.
     """
+    DICT_VERSION = 1
 
     def __init__(self, exc_info=None, **kwargs):
         if not kwargs:
@@ -591,6 +682,23 @@ class Failure(object):
         """Iterate over exception type names."""
         for et in self._exc_type_names:
             yield et
+
+    @classmethod
+    def from_dict(cls, data):
+        data = dict(data)
+        version = data.pop('version', None)
+        if version != cls.DICT_VERSION:
+            raise ValueError('Invalid dict version of failure object: %r'
+                             % version)
+        return cls(**data)
+
+    def to_dict(self):
+        return {
+            'exception_str': self.exception_str,
+            'traceback_str': self.traceback_str,
+            'exc_type_names': list(self),
+            'version': self.DICT_VERSION,
+        }
 
     def copy(self):
         return Failure(exc_info=copy_exc_info(self.exc_info),

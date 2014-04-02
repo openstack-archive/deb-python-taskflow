@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012-2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -21,15 +19,59 @@ import types
 
 import six
 
+from taskflow.openstack.common import importutils
+
+
+def _get_members(obj, exclude_hidden):
+    """Yields the members of an object, filtering by hidden/not hidden."""
+    for (name, value) in inspect.getmembers(obj):
+        if name.startswith("_") and exclude_hidden:
+            continue
+        yield (name, value)
+
+
+def find_subclasses(locations, base_cls, exclude_hidden=True):
+    """Examines the given locations for types which are subclasses of the base
+    class type provided and returns the found subclasses.
+
+    If a string is provided as one of the locations it will be imported and
+    examined if it is a subclass of the base class. If a module is given,
+    all of its members will be examined for attributes which are subclasses of
+    the base class. If a type itself is given it will be examined for being a
+    subclass of the base class.
+    """
+    derived = set()
+    for item in locations:
+        module = None
+        if isinstance(item, six.string_types):
+            try:
+                pkg, cls = item.split(':')
+            except ValueError:
+                module = importutils.import_module(item)
+            else:
+                obj = importutils.import_class('%s.%s' % (pkg, cls))
+                if not is_subclass(obj, base_cls):
+                    raise TypeError("Item %s is not a %s subclass" %
+                                    (item, base_cls))
+                derived.add(obj)
+        elif isinstance(item, types.ModuleType):
+            module = item
+        elif is_subclass(item, base_cls):
+            derived.add(item)
+        else:
+            raise TypeError("Item %s unexpected type: %s" %
+                            (item, type(item)))
+        # If it's a module derive objects from it if we can.
+        if module is not None:
+            for (_name, obj) in _get_members(module, exclude_hidden):
+                if is_subclass(obj, base_cls):
+                    derived.add(obj)
+    return derived
+
 
 def get_member_names(obj, exclude_hidden=True):
     """Get all the member names for a object."""
-    names = []
-    for (name, _value) in inspect.getmembers(obj):
-        if exclude_hidden and name.startswith("_"):
-            continue
-        names.append(name)
-    return sorted(names)
+    return [name for (name, _obj) in _get_members(obj, exclude_hidden)]
 
 
 def get_class_name(obj):
@@ -103,8 +145,8 @@ def is_same_callback(callback1, callback2, strict=True):
     if callback1 == callback2:
         if not strict:
             return True
-        # If two bound method are equal if functions themselves are equal
-        # and objects they are applied to are equal. This means that a bound
+        # Two bound methods are equal if functions themselves are equal and
+        # objects they are applied to are equal. This means that a bound
         # method could be the same bound method on another object if the
         # objects have __eq__ methods that return true (when in fact it is a
         # different bound method). Python u so crazy!
@@ -118,8 +160,13 @@ def is_same_callback(callback1, callback2, strict=True):
 
 
 def is_bound_method(method):
-    """Returns if the method given is a bound to a object or not."""
+    """Returns if the given method is bound to an object."""
     return bool(get_method_self(method))
+
+
+def is_subclass(obj, cls):
+    """Returns if the object is class and it is subclass of a given class."""
+    return inspect.isclass(obj) and issubclass(obj, cls)
 
 
 def _get_arg_spec(function):

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,39 +15,44 @@
 #    under the License.
 
 import contextlib
+import threading
 
 import six
 
+from taskflow import exceptions
 from taskflow.persistence.backends import impl_memory
+from taskflow import retry
 from taskflow import task
+from taskflow.utils import misc
 
 ARGS_KEY = '__args__'
 KWARGS_KEY = '__kwargs__'
 ORDER_KEY = '__order__'
 
 
-def make_reverting_task(token, blowup=False):
+@contextlib.contextmanager
+def wrap_all_failures():
+    """Convert any exceptions to WrappedFailure.
 
-    def do_revert(context, *args, **kwargs):
-        context[token] = 'reverted'
-
-    if blowup:
-
-        def blow_up(context, *args, **kwargs):
-            raise RuntimeError("I blew up")
-
-        return task.FunctorTask(blow_up, name='blowup_%s' % token)
-    else:
-
-        def do_apply(context, *args, **kwargs):
-            context[token] = 'passed'
-
-        return task.FunctorTask(do_apply, revert=do_revert,
-                                name='do_apply_%s' % token)
+    When you expect several failures, it may be convenient
+    to wrap any exception with WrappedFailure in order to
+    unify error handling.
+    """
+    try:
+        yield
+    except Exception:
+        raise exceptions.WrappedFailure([misc.Failure()])
 
 
 class DummyTask(task.Task):
+
     def execute(self, context, *args, **kwargs):
+        pass
+
+
+class FakeTask(object):
+
+    def execute(self, **kwargs):
         pass
 
 
@@ -73,6 +76,23 @@ class ProvidesRequiresTask(task.Task):
             return tuple(range(len(self.provides)))
         else:
             return dict((k, k) for k in self.provides)
+
+
+def task_callback(state, values, details):
+    name = details.get('task_name', None)
+    if not name:
+        name = details.get('retry_name', '<unknown>')
+    values.append('%s %s' % (name, state))
+
+
+def flow_callback(state, values, details):
+    values.append('flow %s' % state)
+
+
+def register_notifiers(engine, values):
+    engine.notifier.register('*', flow_callback, kwargs={'values': values})
+    engine.task_notifier.register('*', task_callback,
+                                  kwargs={'values': values})
 
 
 class SaveOrderTask(task.Task):
@@ -101,7 +121,27 @@ class FailingTask(SaveOrderTask):
         raise RuntimeError('Woot!')
 
 
+class TaskWithFailure(task.Task):
+
+    def execute(self, **kwargs):
+        raise RuntimeError('Woot!')
+
+
+class ProgressingTask(task.Task):
+
+    def execute(self, *args, **kwargs):
+        self.update_progress(0.0)
+        self.update_progress(1.0)
+        return 5
+
+
+class FailingTaskWithOneArg(SaveOrderTask):
+    def execute(self, x, **kwargs):
+        raise RuntimeError('Woot with %s' % x)
+
+
 class NastyTask(task.Task):
+
     def execute(self, **kwargs):
         pass
 
@@ -186,7 +226,7 @@ class TaskMultiArgMultiReturn(task.Task):
         pass
 
 
-class TaskMultiDictk(task.Task):
+class TaskMultiDict(task.Task):
 
     def execute(self):
         output = {}
@@ -220,3 +260,64 @@ class EngineTestBase(object):
 
     def _make_engine(self, flow, flow_detail=None):
         raise NotImplementedError()
+
+
+class FailureMatcher(object):
+    """Needed for failure objects comparison."""
+
+    def __init__(self, failure):
+        self._failure = failure
+
+    def __repr__(self):
+        return str(self._failure)
+
+    def __eq__(self, other):
+        return self._failure.matches(other)
+
+
+class OneReturnRetry(retry.AlwaysRevert):
+
+    def execute(self, **kwargs):
+        return 1
+
+    def revert(self, **kwargs):
+        pass
+
+
+class ConditionalTask(SaveOrderTask):
+
+    def execute(self, x, y):
+        super(ConditionalTask, self).execute()
+        if x != y:
+            raise RuntimeError('Woot!')
+
+
+class WaitForOneFromTask(SaveOrderTask):
+
+    def __init__(self, name, wait_for, wait_states, **kwargs):
+        super(WaitForOneFromTask, self).__init__(name, **kwargs)
+        if isinstance(wait_for, six.string_types):
+            self.wait_for = [wait_for]
+        else:
+            self.wait_for = wait_for
+        if isinstance(wait_states, six.string_types):
+            self.wait_states = [wait_states]
+        else:
+            self.wait_states = wait_states
+        self.event = threading.Event()
+
+    def execute(self):
+        # NOTE(imelnikov): if test was not complete within
+        # 5 minutes, something is terribly wrong
+        self.event.wait(300)
+        if not self.event.is_set():
+            raise RuntimeError('Timeout occurred while waiting '
+                               'for %s to change state to %s'
+                               % (self.wait_for, self.wait_states))
+        return super(WaitForOneFromTask, self).execute()
+
+    def callback(self, state, details):
+        name = details.get('task_name', None)
+        if name not in self.wait_for or state not in self.wait_states:
+            return
+        self.event.set()

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Rackspace Hosting All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -21,6 +19,7 @@ import contextlib
 from taskflow import exceptions as exc
 from taskflow.openstack.common import uuidutils
 from taskflow.persistence import logbook
+from taskflow import states
 from taskflow.utils import misc
 
 
@@ -58,7 +57,7 @@ class PersistenceTestMixin(object):
         lb.add(fd)
 
         # Ensure we can't save it since its owning logbook hasn't been
-        # saved (flow details can not exist on there own without a connection
+        # saved (flow details can not exist on their own without a connection
         # to a logbook).
         with contextlib.closing(self._get_connection()) as conn:
             self.assertRaises(exc.NotFound, conn.get_logbook, lb_id)
@@ -99,17 +98,17 @@ class PersistenceTestMixin(object):
         fd.add(td)
 
         # Ensure we can't save it since its owning logbook hasn't been
-        # saved (flow details/task details can not exist on there own without
-        # there parent existing).
+        # saved (flow details/task details can not exist on their own without
+        # their parent existing).
         with contextlib.closing(self._get_connection()) as conn:
             self.assertRaises(exc.NotFound, conn.update_flow_details, fd)
-            self.assertRaises(exc.NotFound, conn.update_task_details, td)
+            self.assertRaises(exc.NotFound, conn.update_atom_details, td)
 
         # Ok now we should be able to save them.
         with contextlib.closing(self._get_connection()) as conn:
             conn.save_logbook(lb)
             conn.update_flow_details(fd)
-            conn.update_task_details(td)
+            conn.update_atom_details(td)
 
     def test_task_detail_meta_update(self):
         lb_id = uuidutils.generate_uuid()
@@ -124,17 +123,18 @@ class PersistenceTestMixin(object):
         with contextlib.closing(self._get_connection()) as conn:
             conn.save_logbook(lb)
             conn.update_flow_details(fd)
-            conn.update_task_details(td)
+            conn.update_atom_details(td)
 
         td.meta['test'] = 43
         with contextlib.closing(self._get_connection()) as conn:
-            conn.update_task_details(td)
+            conn.update_atom_details(td)
 
         with contextlib.closing(self._get_connection()) as conn:
             lb2 = conn.get_logbook(lb_id)
         fd2 = lb2.find(fd.uuid)
         td2 = fd2.find(td.uuid)
         self.assertEqual(td2.meta.get('test'), 43)
+        self.assertIsInstance(td2, logbook.TaskDetail)
 
     def test_task_detail_with_failure(self):
         lb_id = uuidutils.generate_uuid()
@@ -154,7 +154,7 @@ class PersistenceTestMixin(object):
         with contextlib.closing(self._get_connection()) as conn:
             conn.save_logbook(lb)
             conn.update_flow_details(fd)
-            conn.update_task_details(td)
+            conn.update_atom_details(td)
 
         # Read failure back
         with contextlib.closing(self._get_connection()) as conn:
@@ -165,6 +165,7 @@ class PersistenceTestMixin(object):
         self.assertEqual(failure.exception_str, 'Woot!')
         self.assertIs(failure.check(RuntimeError), RuntimeError)
         self.assertEqual(failure.traceback_str, td.failure.traceback_str)
+        self.assertIsInstance(td2, logbook.TaskDetail)
 
     def test_logbook_merge_flow_detail(self):
         lb_id = uuidutils.generate_uuid()
@@ -222,6 +223,7 @@ class PersistenceTestMixin(object):
             self.assertIsNot(td2, None)
             self.assertEqual(td2.name, 'detail-1')
             self.assertEqual(td2.version, '4.2')
+            self.assertEqual(td2.intention, states.EXECUTE)
 
     def test_logbook_delete(self):
         lb_id = uuidutils.generate_uuid()
@@ -237,3 +239,80 @@ class PersistenceTestMixin(object):
         with contextlib.closing(self._get_connection()) as conn:
             conn.destroy_logbook(lb_id)
             self.assertRaises(exc.NotFound, conn.destroy_logbook, lb_id)
+
+    def test_task_detail_retry_type_(self):
+        lb_id = uuidutils.generate_uuid()
+        lb_name = 'lb-%s' % (lb_id)
+        lb = logbook.LogBook(name=lb_name, uuid=lb_id)
+        fd = logbook.FlowDetail('test', uuid=uuidutils.generate_uuid())
+        lb.add(fd)
+        rd = logbook.RetryDetail("detail-1", uuid=uuidutils.generate_uuid())
+        rd.intention = states.REVERT
+        fd.add(rd)
+
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.save_logbook(lb)
+            conn.update_flow_details(fd)
+            conn.update_atom_details(rd)
+
+        with contextlib.closing(self._get_connection()) as conn:
+            lb2 = conn.get_logbook(lb_id)
+        fd2 = lb2.find(fd.uuid)
+        rd2 = fd2.find(rd.uuid)
+        self.assertEqual(rd2.intention, states.REVERT)
+        self.assertIsInstance(rd2, logbook.RetryDetail)
+
+    def test_retry_detail_save_with_task_failure(self):
+        lb_id = uuidutils.generate_uuid()
+        lb_name = 'lb-%s' % (lb_id)
+        lb = logbook.LogBook(name=lb_name, uuid=lb_id)
+        fd = logbook.FlowDetail('test', uuid=uuidutils.generate_uuid())
+        lb.add(fd)
+        rd = logbook.RetryDetail("retry-1", uuid=uuidutils.generate_uuid())
+        fail = misc.Failure.from_exception(RuntimeError('fail'))
+        rd.results.append((42, {'some-task': fail}))
+        fd.add(rd)
+
+        # save it
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.save_logbook(lb)
+            conn.update_flow_details(fd)
+            conn.update_atom_details(rd)
+
+        # now read it back
+        with contextlib.closing(self._get_connection()) as conn:
+            lb2 = conn.get_logbook(lb_id)
+        fd2 = lb2.find(fd.uuid)
+        rd2 = fd2.find(rd.uuid)
+        self.assertIsInstance(rd2, logbook.RetryDetail)
+        fail2 = rd2.results[0][1].get('some-task')
+        self.assertIsInstance(fail2, misc.Failure)
+        self.assertTrue(fail.matches(fail2))
+
+    def test_retry_detail_save_intention(self):
+        lb_id = uuidutils.generate_uuid()
+        lb_name = 'lb-%s' % (lb_id)
+        lb = logbook.LogBook(name=lb_name, uuid=lb_id)
+        fd = logbook.FlowDetail('test', uuid=uuidutils.generate_uuid())
+        lb.add(fd)
+        rd = logbook.RetryDetail("retry-1", uuid=uuidutils.generate_uuid())
+        fd.add(rd)
+
+        # save it
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.save_logbook(lb)
+            conn.update_flow_details(fd)
+            conn.update_atom_details(rd)
+
+        # change intention and save
+        rd.intention = states.REVERT
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.update_atom_details(rd)
+
+        # now read it back
+        with contextlib.closing(self._get_connection()) as conn:
+            lb2 = conn.get_logbook(lb_id)
+        fd2 = lb2.find(fd.uuid)
+        rd2 = fd2.find(rd.uuid)
+        self.assertEqual(rd2.intention, states.REVERT)
+        self.assertIsInstance(rd2, logbook.RetryDetail)

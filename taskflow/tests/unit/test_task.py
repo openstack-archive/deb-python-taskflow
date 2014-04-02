@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -61,6 +59,14 @@ class TaskTest(test.TestCase):
         my_task = MyTask()
         self.assertEqual(my_task.name,
                          '%s.%s' % (__name__, 'MyTask'))
+
+    def test_task_str(self):
+        my_task = MyTask(name='my')
+        self.assertEqual(str(my_task), 'my==1.0')
+
+    def test_task_repr(self):
+        my_task = MyTask(name='my')
+        self.assertEqual(repr(my_task), '<%s.MyTask my==1.0>' % __name__)
 
     def test_no_provides(self):
         my_task = MyTask()
@@ -227,27 +233,27 @@ class TaskTest(test.TestCase):
         self.assertEqual(result, [1.0, 1.0, 1.0])
         self.assertEqual(mocked_warn.call_count, 2)
 
-    @mock.patch.object(task.LOG, 'exception')
-    def test_update_progress_handler_failure(self, mocked_exception):
+    @mock.patch.object(task.LOG, 'warn')
+    def test_update_progress_handler_failure(self, mocked_warn):
         def progress_callback(*args, **kwargs):
             raise Exception('Woot!')
 
         task = ProgressTask()
         with task.autobind('update_progress', progress_callback):
             task.execute([0.5])
-        mocked_exception.assert_called_once_with(
+        mocked_warn.assert_called_once_with(
             mock.ANY, reflection.get_callable_name(progress_callback),
-            'update_progress')
+            'update_progress', exc_info=mock.ANY)
 
-    @mock.patch.object(task.LOG, 'exception')
-    def test_autobind_non_existent_event(self, mocked_exception):
+    @mock.patch.object(task.LOG, 'warn')
+    def test_autobind_non_existent_event(self, mocked_warn):
         event = 'test-event'
         handler = lambda: None
         task = MyTask()
         with task.autobind(event, handler):
             self.assertEqual(len(task._events_listeners), 0)
-            mocked_exception.assert_called_once_with(
-                mock.ANY, handler, event, task)
+            mocked_warn.assert_called_once_with(
+                mock.ANY, handler, event, task, exc_info=mock.ANY)
 
     def test_autobind_handler_is_none(self):
         task = MyTask()

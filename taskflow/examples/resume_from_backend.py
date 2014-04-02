@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -44,6 +42,19 @@ import example_utils  # noqa
 # to start an engine, have a task stop the engine from doing future work (if
 # a multi-threaded engine is being used, then the currently active work is not
 # preempted) and then resume the work later.
+#
+# Usage:
+#
+#   With a filesystem directory as backend
+#
+#     python taskflow/examples/resume_from_backend.py
+#
+#   With ZooKeeper as backend
+#
+#     python taskflow/examples/resume_from_backend.py \
+#       zookeeper://127.0.0.1:2181/taskflow/resume_from_backend/
+#
+
 
 ### UTILITY FUNCTIONS #########################################
 

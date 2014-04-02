@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Rackspace Hosting Inc. All Rights Reserved.
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
@@ -21,6 +19,7 @@ import logging
 
 import six
 
+from taskflow import exceptions
 from taskflow.utils import misc
 from taskflow.utils import reflection
 
@@ -33,7 +32,7 @@ def _save_as_to_mapping(save_as):
     Result should follow storage convention for mappings.
     """
     # TODO(harlowja): we should probably document this behavior & convention
-    # outside of code so that its more easily understandable, since what an
+    # outside of code so that it's more easily understandable, since what an
     # atom returns is pretty crucial for other later operations.
     if save_as is None:
         return {}
@@ -77,13 +76,18 @@ def _build_rebind_dict(args, rebind_args):
         raise TypeError('Invalid rebind value: %s' % rebind_args)
 
 
-def _build_arg_mapping(task_name, reqs, rebind_args, function, do_infer):
+def _build_arg_mapping(task_name, reqs, rebind_args, function, do_infer,
+                       ignore_list=None):
     """Given a function, its requirements and a rebind mapping this helper
     function will build the correct argument mapping for the given function as
     well as verify that the final argument mapping does not have missing or
     extra arguments (where applicable).
     """
     task_args = reflection.get_callable_args(function, required_only=True)
+    if ignore_list:
+        for arg in ignore_list:
+            if arg in task_args:
+                task_args.remove(arg)
     result = {}
     if reqs:
         result.update((a, a) for a in reqs)
@@ -128,16 +132,26 @@ class Atom(object):
         self.version = (1, 0)
 
     def _build_arg_mapping(self, executor, requires=None, rebind=None,
-                           auto_extract=True):
+                           auto_extract=True, ignore_list=None):
         self.rebind = _build_arg_mapping(self.name, requires, rebind,
-                                         executor, auto_extract)
+                                         executor, auto_extract, ignore_list)
+        out_of_order = self.provides.intersection(self.requires)
+        if out_of_order:
+            raise exceptions.DependencyFailure(
+                "Atom %(item)s provides %(oo)s that are required "
+                "by this atom"
+                % dict(item=self.name, oo=sorted(out_of_order)))
 
     @property
     def name(self):
+        """A non-unique name for this atom (human readable)."""
         return self._name
 
     def __str__(self):
         return "%s==%s" % (self.name, misc.get_version_string(self))
+
+    def __repr__(self):
+        return '<%s %s>' % (reflection.get_class_name(self), self)
 
     @property
     def provides(self):

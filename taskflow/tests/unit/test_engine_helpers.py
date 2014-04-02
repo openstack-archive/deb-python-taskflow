@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -28,7 +26,7 @@ import taskflow.engines
 class FlowFromDetailTestCase(test.TestCase):
     def test_no_meta(self):
         _lb, flow_detail = p_utils.temporary_flow_detail()
-        self.assertIs(flow_detail.meta, None)
+        self.assertEqual({}, flow_detail.meta)
         self.assertRaisesRegexp(ValueError,
                                 '^Cannot .* no factory information saved.$',
                                 taskflow.engines.flow_from_detail,
@@ -36,7 +34,6 @@ class FlowFromDetailTestCase(test.TestCase):
 
     def test_no_factory_in_meta(self):
         _lb, flow_detail = p_utils.temporary_flow_detail()
-        flow_detail.meta = {}
         self.assertRaisesRegexp(ValueError,
                                 '^Cannot .* no factory information saved.$',
                                 taskflow.engines.flow_from_detail,

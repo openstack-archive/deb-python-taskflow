@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #    Copyright (C) 2013 Rackspace Hosting All Rights Reserved.
 #
@@ -26,6 +24,7 @@ import copy
 import logging
 import time
 
+import six
 import sqlalchemy as sa
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import orm as sa_orm
@@ -38,7 +37,6 @@ from taskflow.persistence.backends.sqlalchemy import models
 from taskflow.persistence import logbook
 from taskflow.utils import eventlet_utils
 from taskflow.utils import misc
-from taskflow.utils import persistence_utils
 
 
 LOG = logging.getLogger(__name__)
@@ -101,7 +99,7 @@ SQLITE_IN_MEMORY = ('sqlite://', 'sqlite:///', 'sqlite:///:memory:')
 def _in_any(reason, err_haystack):
     """Checks if any elements of the haystack are in the given reason."""
     for err in err_haystack:
-        if reason.find(str(err)) != -1:
+        if reason.find(six.text_type(err)) != -1:
             return True
     return False
 
@@ -142,11 +140,11 @@ def _ping_listener(dbapi_conn, connection_rec, connection_proxy):
     try:
         dbapi_conn.cursor().execute('select 1')
     except dbapi_conn.OperationalError as ex:
-        if _in_any(str(ex.args[0]), MY_SQL_GONE_WAY_AWAY_ERRORS):
-            LOG.warn('Got mysql server has gone away: %s', ex)
+        if _in_any(six.text_type(ex.args[0]), MY_SQL_GONE_WAY_AWAY_ERRORS):
+            LOG.warn('Got mysql server has gone away', exc_info=True)
             raise sa_exc.DisconnectionError("Database server went away")
-        elif _in_any(str(ex.args[0]), POSTGRES_GONE_WAY_AWAY_ERRORS):
-            LOG.warn('Got postgres server has gone away: %s', ex)
+        elif _in_any(six.text_type(ex.args[0]), POSTGRES_GONE_WAY_AWAY_ERRORS):
+            LOG.warn('Got postgres server has gone away', exc_info=True)
             raise sa_exc.DisconnectionError("Database server went away")
         else:
             raise
@@ -268,7 +266,7 @@ class Connection(base.Connection):
                 with contextlib.closing(self._engine.connect()):
                     pass
             except sa_exc.OperationalError as ex:
-                if _is_db_connection_error(str(ex.args[0])):
+                if _is_db_connection_error(six.text_type(ex.args[0])):
                     failures.append(misc.Failure())
                     return False
             return True
@@ -309,16 +307,14 @@ class Connection(base.Connection):
                 return functor(session, *args, **kwargs)
         except sa_exc.SQLAlchemyError as e:
             LOG.exception('Failed running database session')
-            raise exc.StorageError("Failed running database session: %s" % e,
-                                   e)
+            raise exc.StorageFailure("Storage backend internal error", e)
 
     def _make_session(self):
         try:
             return self._session_maker()
         except sa_exc.SQLAlchemyError as e:
             LOG.exception('Failed creating database session')
-            raise exc.StorageError("Failed creating database session: %s"
-                                   % e, e)
+            raise exc.StorageFailure("Failed creating database session", e)
 
     def upgrade(self):
         try:
@@ -335,8 +331,7 @@ class Connection(base.Connection):
                     migration.db_sync(conn)
         except sa_exc.SQLAlchemyError as e:
             LOG.exception('Failed upgrading database version')
-            raise exc.StorageError("Failed upgrading database version: %s" % e,
-                                   e)
+            raise exc.StorageFailure("Failed upgrading database version", e)
 
     def _clear_all(self, session):
         # NOTE(harlowja): due to how we have our relationship setup and
@@ -346,22 +341,22 @@ class Connection(base.Connection):
             return session.query(models.LogBook).delete()
         except sa_exc.DBAPIError as e:
             LOG.exception('Failed clearing all entries')
-            raise exc.StorageError("Failed clearing all entries: %s" % e, e)
+            raise exc.StorageFailure("Failed clearing all entries", e)
 
     def clear_all(self):
         return self._run_in_session(self._clear_all)
 
-    def _update_task_details(self, session, td):
-        # Must already exist since a tasks details has a strong connection to
-        # a flow details, and tasks details can not be saved on there own since
-        # they *must* have a connection to an existing flow details.
-        td_m = _task_details_get_model(td.uuid, session=session)
-        td_m = _taskdetails_merge(td_m, td)
-        td_m = session.merge(td_m)
-        return _convert_td_to_external(td_m)
+    def _update_atom_details(self, session, ad):
+        # Must already exist since a atoms details has a strong connection to
+        # a flow details, and atom details can not be saved on there own since
+        # they *must* have a connection to an existing flow detail.
+        ad_m = _atom_details_get_model(ad.uuid, session=session)
+        ad_m = _atomdetails_merge(ad_m, ad)
+        ad_m = session.merge(ad_m)
+        return _convert_ad_to_external(ad_m)
 
-    def update_task_details(self, task_detail):
-        return self._run_in_session(self._update_task_details, td=task_detail)
+    def update_atom_details(self, atom_detail):
+        return self._run_in_session(self._update_atom_details, ad=atom_detail)
 
     def _update_flow_details(self, session, fd):
         # Must already exist since a flow details has a strong connection to
@@ -381,8 +376,7 @@ class Connection(base.Connection):
             session.delete(lb)
         except sa_exc.DBAPIError as e:
             LOG.exception('Failed destroying logbook')
-            raise exc.StorageError("Failed destroying"
-                                   " logbook %s: %s" % (lb_id, e), e)
+            raise exc.StorageFailure("Failed destroying logbook %s" % lb_id, e)
 
     def destroy_logbook(self, book_uuid):
         return self._run_in_session(self._destroy_logbook, lb_id=book_uuid)
@@ -403,8 +397,7 @@ class Connection(base.Connection):
             return _convert_lb_to_external(lb_m)
         except sa_exc.DBAPIError as e:
             LOG.exception('Failed saving logbook')
-            raise exc.StorageError("Failed saving logbook %s: %s" %
-                                   (lb.uuid, e), e)
+            raise exc.StorageFailure("Failed saving logbook %s" % lb.uuid, e)
 
     def save_logbook(self, book):
         return self._run_in_session(self._save_logbook, lb=book)
@@ -416,8 +409,8 @@ class Connection(base.Connection):
             return _convert_lb_to_external(lb)
         except sa_exc.DBAPIError as e:
             LOG.exception('Failed getting logbook')
-            raise exc.StorageError("Failed getting logbook %s: %s"
-                                   % (book_uuid, e), e)
+            raise exc.StorageFailure("Failed getting logbook %s" % book_uuid,
+                                     e)
 
     def get_logbooks(self):
         session = self._make_session()
@@ -426,7 +419,7 @@ class Connection(base.Connection):
             books = [_convert_lb_to_external(lb) for lb in raw_books]
         except sa_exc.DBAPIError as e:
             LOG.exception('Failed getting logbooks')
-            raise exc.StorageError("Failed getting logbooks: %s" % e, e)
+            raise exc.StorageFailure("Failed getting logbooks", e)
         for lb in books:
             yield lb
 
@@ -438,12 +431,63 @@ class Connection(base.Connection):
 ###
 
 
+def _atomdetails_merge(ad_m, ad):
+    atom_type = logbook.atom_detail_type(ad)
+    if atom_type != ad_m.atom_type:
+        raise exc.StorageFailure("Can not merge differing atom types "
+                                 "(%s != %s)" % (atom_type, ad_m.atom_type))
+    ad_d = ad.to_dict()
+    ad_m.state = ad_d['state']
+    ad_m.intention = ad_d['intention']
+    ad_m.results = ad_d['results']
+    ad_m.version = ad_d['version']
+    ad_m.failure = ad_d['failure']
+    ad_m.meta = ad_d['meta']
+    ad_m.name = ad_d['name']
+    return ad_m
+
+
+def _flowdetails_merge(fd_m, fd):
+    fd_d = fd.to_dict()
+    fd_m.state = fd_d['state']
+    fd_m.name = fd_d['name']
+    fd_m.meta = fd_d['meta']
+    for ad in fd:
+        existing_ad = False
+        for ad_m in fd_m.atomdetails:
+            if ad_m.uuid == ad.uuid:
+                existing_ad = True
+                ad_m = _atomdetails_merge(ad_m, ad)
+                break
+        if not existing_ad:
+            ad_m = _convert_ad_to_internal(ad, fd_m.uuid)
+            fd_m.atomdetails.append(ad_m)
+    return fd_m
+
+
+def _logbook_merge(lb_m, lb):
+    lb_d = lb.to_dict()
+    lb_m.meta = lb_d['meta']
+    lb_m.name = lb_d['name']
+    lb_m.created_at = lb_d['created_at']
+    lb_m.updated_at = lb_d['updated_at']
+    for fd in lb:
+        existing_fd = False
+        for fd_m in lb_m.flowdetails:
+            if fd_m.uuid == fd.uuid:
+                existing_fd = True
+                fd_m = _flowdetails_merge(fd_m, fd)
+        if not existing_fd:
+            lb_m.flowdetails.append(_convert_fd_to_internal(fd, lb_m.uuid))
+    return lb_m
+
+
 def _convert_fd_to_external(fd):
     fd_c = logbook.FlowDetail(fd.name, uuid=fd.uuid)
     fd_c.meta = fd.meta
     fd_c.state = fd.state
-    for td in fd.taskdetails:
-        fd_c.add(_convert_td_to_external(td))
+    for ad_m in fd.atomdetails:
+        fd_c.add(_convert_ad_to_external(ad_m))
     return fd_c
 
 
@@ -451,37 +495,40 @@ def _convert_fd_to_internal(fd, parent_uuid):
     fd_m = models.FlowDetail(name=fd.name, uuid=fd.uuid,
                              parent_uuid=parent_uuid, meta=fd.meta,
                              state=fd.state)
-    fd_m.taskdetails = []
-    for td in fd:
-        fd_m.taskdetails.append(_convert_td_to_internal(td, fd_m.uuid))
+    fd_m.atomdetails = []
+    for ad in fd:
+        fd_m.atomdetails.append(_convert_ad_to_internal(ad, fd_m.uuid))
     return fd_m
 
 
-def _convert_td_to_internal(td, parent_uuid):
-    return models.TaskDetail(name=td.name, uuid=td.uuid,
-                             state=td.state, results=td.results,
-                             failure=td.failure, meta=td.meta,
-                             version=td.version, parent_uuid=parent_uuid)
+def _convert_ad_to_internal(ad, parent_uuid):
+    converted = ad.to_dict()
+    converted['atom_type'] = logbook.atom_detail_type(ad)
+    converted['parent_uuid'] = parent_uuid
+    return models.AtomDetail(**converted)
 
 
-def _convert_td_to_external(td):
+def _convert_ad_to_external(ad):
     # Convert from sqlalchemy model -> external model, this allows us
     # to change the internal sqlalchemy model easily by forcing a defined
     # interface (that isn't the sqlalchemy model itself).
-    td_c = logbook.TaskDetail(td.name, uuid=td.uuid)
-    td_c.state = td.state
-    td_c.results = td.results
-    td_c.failure = td.failure
-    td_c.meta = td.meta
-    td_c.version = td.version
-    return td_c
+    atom_cls = logbook.atom_detail_class(ad.atom_type)
+    return atom_cls.from_dict({
+        'state': ad.state,
+        'intention': ad.intention,
+        'results': ad.results,
+        'failure': ad.failure,
+        'meta': ad.meta,
+        'version': ad.version,
+        'name': ad.name,
+        'uuid': ad.uuid,
+    })
 
 
 def _convert_lb_to_external(lb_m):
-    """Don't expose the internal sqlalchemy ORM model to the external api."""
-    lb_c = logbook.LogBook(lb_m.name, lb_m.uuid,
-                           updated_at=lb_m.updated_at,
-                           created_at=lb_m.created_at)
+    lb_c = logbook.LogBook(lb_m.name, lb_m.uuid)
+    lb_c.updated_at = lb_m.updated_at
+    lb_c.created_at = lb_m.created_at
     lb_c.meta = lb_m.meta
     for fd_m in lb_m.flowdetails:
         lb_c.add(_convert_fd_to_external(fd_m))
@@ -489,7 +536,6 @@ def _convert_lb_to_external(lb_m):
 
 
 def _convert_lb_to_internal(lb_c):
-    """Don't expose the external model to the sqlalchemy ORM model."""
     lb_m = models.LogBook(uuid=lb_c.uuid, meta=lb_c.meta, name=lb_c.name)
     lb_m.flowdetails = []
     for fd_c in lb_c:
@@ -504,47 +550,15 @@ def _logbook_get_model(lb_id, session):
     return entry
 
 
-def _flow_details_get_model(f_id, session):
-    entry = session.query(models.FlowDetail).filter_by(uuid=f_id).first()
+def _flow_details_get_model(flow_id, session):
+    entry = session.query(models.FlowDetail).filter_by(uuid=flow_id).first()
     if entry is None:
-        raise exc.NotFound("No flow details found with id: %s" % f_id)
+        raise exc.NotFound("No flow details found with id: %s" % flow_id)
     return entry
 
 
-def _task_details_get_model(t_id, session):
-    entry = session.query(models.TaskDetail).filter_by(uuid=t_id).first()
+def _atom_details_get_model(atom_id, session):
+    entry = session.query(models.AtomDetail).filter_by(uuid=atom_id).first()
     if entry is None:
-        raise exc.NotFound("No task details found with id: %s" % t_id)
+        raise exc.NotFound("No atom details found with id: %s" % atom_id)
     return entry
-
-
-def _logbook_merge(lb_m, lb):
-    lb_m = persistence_utils.logbook_merge(lb_m, lb)
-    for fd in lb:
-        existing_fd = False
-        for fd_m in lb_m.flowdetails:
-            if fd_m.uuid == fd.uuid:
-                existing_fd = True
-                fd_m = _flowdetails_merge(fd_m, fd)
-        if not existing_fd:
-            lb_m.flowdetails.append(_convert_fd_to_internal(fd, lb_m.uuid))
-    return lb_m
-
-
-def _flowdetails_merge(fd_m, fd):
-    fd_m = persistence_utils.flow_details_merge(fd_m, fd)
-    for td in fd:
-        existing_td = False
-        for td_m in fd_m.taskdetails:
-            if td_m.uuid == td.uuid:
-                existing_td = True
-                td_m = _taskdetails_merge(td_m, td)
-                break
-        if not existing_td:
-            td_m = _convert_td_to_internal(td, fd_m.uuid)
-            fd_m.taskdetails.append(td_m)
-    return fd_m
-
-
-def _taskdetails_merge(td_m, td):
-    return persistence_utils.task_details_merge(td_m, td)

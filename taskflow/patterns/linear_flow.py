@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -20,8 +18,11 @@ from taskflow import exceptions
 from taskflow import flow
 
 
+_LINK_METADATA = {'invariant': True}
+
+
 class Flow(flow.Flow):
-    """"Linear Flow pattern.
+    """Linear Flow pattern.
 
     A linear (potentially nested) flow of *tasks/flows* that can be
     applied in order as one unit and rolled back as one unit using
@@ -31,8 +32,8 @@ class Flow(flow.Flow):
     depend on outputs (provided names/values) of tasks/flows that follow it.
     """
 
-    def __init__(self, name):
-        super(Flow, self).__init__(name)
+    def __init__(self, name, retry=None):
+        super(Flow, self).__init__(name, retry)
         self._children = []
 
     def add(self, *items):
@@ -48,7 +49,7 @@ class Flow(flow.Flow):
             requires |= item.requires
             out_of_order = requires & item.provides
             if out_of_order:
-                raise exceptions.InvariantViolation(
+                raise exceptions.DependencyFailure(
                     "%(item)s provides %(oo)s that are required "
                     "by previous item(s) of linear flow %(flow)s"
                     % dict(item=item.name, flow=self.name,
@@ -73,12 +74,15 @@ class Flow(flow.Flow):
         for child in self._children:
             yield child
 
-    def __getitem__(self, index):
-        return self._children[index]
+    def iter_links(self):
+        for src, dst in zip(self._children[:-1],
+                            self._children[1:]):
+            yield (src, dst, _LINK_METADATA.copy())
 
     @property
     def provides(self):
         provides = set()
+        provides.update(self._retry_provides)
         for subflow in self._children:
             provides.update(subflow.provides)
         return provides
@@ -87,6 +91,8 @@ class Flow(flow.Flow):
     def requires(self):
         requires = set()
         provides = set()
+        requires.update(self._retry_requires)
+        provides.update(self._retry_provides)
         for subflow in self._children:
             requires.update(subflow.requires - provides)
             provides.update(subflow.provides)

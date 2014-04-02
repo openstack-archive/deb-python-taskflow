@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -39,19 +37,9 @@ class Flow(flow.Flow):
     Note: Cyclic dependencies are not allowed.
     """
 
-    def __init__(self, name):
-        super(Flow, self).__init__(name)
+    def __init__(self, name, retry=None):
+        super(Flow, self).__init__(name, retry)
         self._graph = nx.freeze(nx.DiGraph())
-
-    def _validate(self, graph=None):
-        if graph is None:
-            graph = self._graph
-        # Ensure that there is a valid topological ordering.
-        if not nx.is_directed_acyclic_graph(graph):
-            raise exc.DependencyFailure("No path through the items in the"
-                                        " graph produces an ordering that"
-                                        " will allow for correct dependency"
-                                        " resolution")
 
     def link(self, u, v):
         """Link existing node u as a runtime dependency of existing node v."""
@@ -88,7 +76,11 @@ class Flow(flow.Flow):
         with a frozen version of the replacement graph (this maintains the
         invariant that the underlying graph is immutable).
         """
-        self._validate(replacement_graph)
+        if not nx.is_directed_acyclic_graph(replacement_graph):
+            raise exc.DependencyFailure("No path through the items in the"
+                                        " graph produces an ordering that"
+                                        " will allow for correct dependency"
+                                        " resolution")
         self._graph = nx.freeze(replacement_graph)
 
     def add(self, *items):
@@ -109,6 +101,11 @@ class Flow(flow.Flow):
             for value in node.provides:
                 provided[value] = node
 
+        if self.retry:
+            update_requirements(self.retry)
+            provided.update(dict((k,
+                                  self.retry) for k in self._retry_provides))
+
         # NOTE(harlowja): Add items and edges to a temporary copy of the
         # underlying graph and only if that is successful added to do we then
         # swap with the underlying graph.
@@ -124,6 +121,15 @@ class Flow(flow.Flow):
                         " are disallowed"
                         % dict(item=item.name,
                                flow=provided[value].name,
+                               value=value))
+                if value in self._retry_requires:
+                    raise exc.DependencyFailure(
+                        "Flows retry controller %(retry)s requires %(value)s "
+                        "but item %(item)s being added to the flow produces "
+                        "that item, this creates a cyclic dependency and is "
+                        "disallowed"
+                        % dict(item=item.name,
+                               retry=self.retry.name,
                                value=value))
                 provided[value] = item
 
@@ -141,16 +147,29 @@ class Flow(flow.Flow):
         self._swap(tmp_graph)
         return self
 
+    def _get_subgraph(self):
+        """Get the active subgraph of _graph.
+
+        Descendants may override this to make only part of self._graph
+        visible.
+        """
+        return self._graph
+
     def __len__(self):
-        return self.graph.number_of_nodes()
+        return self._get_subgraph().number_of_nodes()
 
     def __iter__(self):
-        for n in self.graph.nodes_iter():
+        for n in self._get_subgraph().nodes_iter():
             yield n
+
+    def iter_links(self):
+        for (u, v, e_data) in self._get_subgraph().edges_iter(data=True):
+            yield (u, v, e_data)
 
     @property
     def provides(self):
         provides = set()
+        provides.update(self._retry_provides)
         for subflow in self:
             provides.update(subflow.provides)
         return provides
@@ -158,13 +177,10 @@ class Flow(flow.Flow):
     @property
     def requires(self):
         requires = set()
+        requires.update(self._retry_requires)
         for subflow in self:
             requires.update(subflow.requires)
         return requires - self.provides
-
-    @property
-    def graph(self):
-        return self._graph
 
 
 class TargetedFlow(Flow):
@@ -213,8 +229,7 @@ class TargetedFlow(Flow):
         self._subgraph = None
         return self
 
-    @property
-    def graph(self):
+    def _get_subgraph(self):
         if self._subgraph is not None:
             return self._subgraph
         if self._target is None:

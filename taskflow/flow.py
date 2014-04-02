@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -40,26 +38,52 @@ class Flow(object):
     a flow is just a 'structuring' concept this is typically a behavior that
     should not be worried about (as it is not visible to the user), but it is
     worth mentioning here.
-
-    Flows are expected to provide the following methods/properties:
-
-    - add
-    - __len__
-    - requires
-    - provides
     """
 
-    def __init__(self, name):
-        self._name = str(name)
+    def __init__(self, name, retry=None):
+        self._name = six.text_type(name)
+        self._retry = retry
+        # If retry doesn't have a name,
+        # the name of its owner will be assigned
+        if self._retry:
+            self._retry_provides = self.retry.provides
+            self._retry_requires = self.retry.requires
+            if not self._retry.name:
+                self._retry.set_name(self.name + "_retry")
+        else:
+            self._retry_provides = set()
+            self._retry_requires = set()
 
     @property
     def name(self):
         """A non-unique name for this flow (human readable)."""
         return self._name
 
+    @property
+    def retry(self):
+        """A retry object that will affect control how (and if) this flow
+        retries while execution is underway.
+        """
+        return self._retry
+
     @abc.abstractmethod
     def __len__(self):
         """Returns how many items are in this flow."""
+
+    @abc.abstractmethod
+    def __iter__(self):
+        """Iterates over the children of the flow."""
+
+    @abc.abstractmethod
+    def iter_links(self):
+        """Iterates over dependency links between children of the flow.
+
+        Iterates over 3-tuples ``(A, B, meta)``, where
+            * ``A`` is a child (atom or subflow) link starts from;
+            * ``B`` is a child (atom or subflow) link points to; it is
+              said that ``B`` depends on ``A`` or ``B`` requires ``A``;
+            * ``meta`` is link metadata, a dictionary.
+        """
 
     def __str__(self):
         lines = ["%s: %s" % (reflection.get_class_name(self), self.name)]

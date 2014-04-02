@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -51,6 +49,7 @@ class TestProgress(test.TestCase):
                                   flow_detail=flow_detail,
                                   backend=backend)
         e.compile()
+        e.prepare()
         return e
 
     def tearDown(self):
@@ -102,7 +101,7 @@ class TestProgress(test.TestCase):
             e.run()
             end_progress = e.storage.get_task_progress("test")
             self.assertEqual(1.0, end_progress)
-            task_uuid = e.storage.get_task_uuid("test")
+            task_uuid = e.storage.get_atom_uuid("test")
             td = fd.find(task_uuid)
             self.assertEqual(1.0, td.meta['progress'])
             self.assertFalse(td.meta['progress_details'])
@@ -137,7 +136,7 @@ class TestProgress(test.TestCase):
 
             end_progress = e.storage.get_task_progress("test")
             self.assertEqual(1.0, end_progress)
-            task_uuid = e.storage.get_task_uuid("test")
+            task_uuid = e.storage.get_atom_uuid("test")
             td = fd.find(task_uuid)
             self.assertEqual(1.0, td.meta['progress'])
             self.assertFalse(td.meta['progress_details'])

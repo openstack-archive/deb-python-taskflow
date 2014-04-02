@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -35,11 +33,16 @@ FINISH_STATES = (states.FAILURE, states.SUCCESS)
 
 
 class ListenerBase(object):
-    """This provides a simple listener that can be attached to an engine which
-    can be derived from to do some action on various flow and task state
-    transitions. It provides a useful context manager access to be able to
-    register and unregister with a given engine automatically when a context
+    """Base class for listeners.
+
+    A listener can be attached to an engine to do various actions on flow and
+    task state transitions.  It implements context manager protocol to be able
+    to register and unregister with a given engine automatically when a context
     is entered and when it is exited.
+
+    To implement a listener, derive from this class and override
+    ``_flow_receiver`` and/or ``_task_receiver`` methods (in this class,
+    they do nothing).
     """
 
     def __init__(self, engine,
@@ -108,17 +111,20 @@ class ListenerBase(object):
             self.deregister()
         except Exception:
             # Don't let deregistering throw exceptions
-            LOG.exception("Failed deregistering listeners from engine %s",
-                          self._engine)
+            LOG.warn("Failed deregistering listeners from engine %s",
+                     self._engine, exc_info=True)
 
 
 @six.add_metaclass(abc.ABCMeta)
 class LoggingBase(ListenerBase):
-    """This provides a simple listener that can be attached to an engine which
-    can be derived from to log the received actions to some logging backend. It
-    provides a useful context manager access to be able to register and
-    unregister with a given engine automatically when a context is entered and
-    when it is exited.
+    """Abstract base class for logging listeners.
+
+    This provides a simple listener that can be attached to an engine which can
+    be derived from to log task and/or flow state transitions to some logging
+    backend.
+
+    To implement your own logging listener derive form this class and
+    override ``_log`` method.
     """
 
     @abc.abstractmethod

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #    Copyright (C) 2013 Rackspace Hosting All Rights Reserved.
 #
@@ -21,52 +19,30 @@ import errno
 import logging
 import os
 import shutil
-import threading
-import weakref
 
 import six
 
 from taskflow import exceptions as exc
 from taskflow.openstack.common import jsonutils
 from taskflow.persistence.backends import base
+from taskflow.persistence import logbook
 from taskflow.utils import lock_utils
 from taskflow.utils import misc
-from taskflow.utils import persistence_utils as p_utils
 
 LOG = logging.getLogger(__name__)
-
-# The lock storage is not thread safe to set items in, so this lock is used to
-# protect that access.
-_LOCK_STORAGE_MUTATE = threading.RLock()
-
-# Currently in use paths -> in-process locks are maintained here.
-#
-# NOTE(harlowja): Values in this dictionary will be automatically released once
-# the objects referencing those objects have been garbage collected.
-_LOCK_STORAGE = weakref.WeakValueDictionary()
 
 
 class DirBackend(base.Backend):
     """A backend that writes logbooks, flow details, and task details to a
     provided directory. This backend does *not* provide transactional semantics
     although it does guarantee that there will be no race conditions when
-    writing/reading by using file level locking and in-process locking.
-
-    NOTE(harlowja): this is more of an example/testing backend and likely
-    should *not* be used in production, since this backend lacks transactional
-    semantics.
+    writing/reading by using file level locking.
     """
     def __init__(self, conf):
         super(DirBackend, self).__init__(conf)
         self._path = os.path.abspath(conf['path'])
         self._lock_path = os.path.join(self._path, 'locks')
         self._file_cache = {}
-        # Ensure that multiple threads are not accessing the same storage at
-        # the same time, the file lock mechanism doesn't protect against this
-        # so we must do in-process locking as well.
-        with _LOCK_STORAGE_MUTATE:
-            self._lock = _LOCK_STORAGE.setdefault(self._path,
-                                                  threading.RLock())
 
     @property
     def lock_path(self):
@@ -88,12 +64,8 @@ class Connection(base.Connection):
         self._backend = backend
         self._file_cache = self._backend._file_cache
         self._flow_path = os.path.join(self._backend.base_path, 'flows')
-        self._task_path = os.path.join(self._backend.base_path, 'tasks')
+        self._atom_path = os.path.join(self._backend.base_path, 'atoms')
         self._book_path = os.path.join(self._backend.base_path, 'books')
-        # Share the backends lock so that all threads using the given backend
-        # are restricted in writing, since the per-process lock we are using
-        # to restrict the multi-process access does not work inside a process.
-        self._lock = backend._lock
 
     def validate(self):
         # Verify key paths exist.
@@ -101,7 +73,7 @@ class Connection(base.Connection):
             self._backend.base_path,
             self._backend.lock_path,
             self._flow_path,
-            self._task_path,
+            self._atom_path,
             self._book_path,
         ]
         for p in paths:
@@ -137,8 +109,7 @@ class Connection(base.Connection):
             except Exception as e:
                 LOG.exception("Failed running locking file based session")
                 # NOTE(harlowja): trap all other errors as storage errors.
-                raise exc.StorageError("Failed running locking file based "
-                                       "session: %s" % e, e)
+                raise exc.StorageFailure("Storage backend internal error", e)
 
     def _get_logbooks(self):
         lb_uuids = []
@@ -155,11 +126,13 @@ class Connection(base.Connection):
                 pass
 
     def get_logbooks(self):
-        # NOTE(harlowja): don't hold the lock while iterating.
-        with self._lock:
+        try:
             books = list(self._get_logbooks())
-        for b in books:
-            yield b
+        except EnvironmentError as e:
+            raise exc.StorageFailure("Unable to fetch logbooks", e)
+        else:
+            for b in books:
+                yield b
 
     @property
     def backend(self):
@@ -168,38 +141,38 @@ class Connection(base.Connection):
     def close(self):
         pass
 
-    def _save_task_details(self, task_detail, ignore_missing):
-        # See if we have an existing task detail to merge with.
-        e_td = None
+    def _save_atom_details(self, atom_detail, ignore_missing):
+        # See if we have an existing atom detail to merge with.
+        e_ad = None
         try:
-            e_td = self._get_task_details(task_detail.uuid, lock=False)
+            e_ad = self._get_atom_details(atom_detail.uuid, lock=False)
         except EnvironmentError:
             if not ignore_missing:
-                raise exc.NotFound("No task details found with id: %s"
-                                   % task_detail.uuid)
-        if e_td is not None:
-            task_detail = p_utils.task_details_merge(e_td, task_detail)
-        td_path = os.path.join(self._task_path, task_detail.uuid)
-        td_data = p_utils.format_task_detail(task_detail)
-        self._write_to(td_path, jsonutils.dumps(td_data))
-        return task_detail
+                raise exc.NotFound("No atom details found with id: %s"
+                                   % atom_detail.uuid)
+        if e_ad is not None:
+            atom_detail = e_ad.merge(atom_detail)
+        ad_path = os.path.join(self._atom_path, atom_detail.uuid)
+        ad_data = base._format_atom(atom_detail)
+        self._write_to(ad_path, jsonutils.dumps(ad_data))
+        return atom_detail
 
-    @lock_utils.locked
-    def update_task_details(self, task_detail):
-        return self._run_with_process_lock("task",
-                                           self._save_task_details,
-                                           task_detail,
+    def update_atom_details(self, atom_detail):
+        return self._run_with_process_lock("atom",
+                                           self._save_atom_details,
+                                           atom_detail,
                                            ignore_missing=False)
 
-    def _get_task_details(self, uuid, lock=True):
+    def _get_atom_details(self, uuid, lock=True):
 
         def _get():
-            td_path = os.path.join(self._task_path, uuid)
-            td_data = jsonutils.loads(self._read_from(td_path))
-            return p_utils.unformat_task_detail(uuid, td_data)
+            ad_path = os.path.join(self._atom_path, uuid)
+            ad_data = misc.decode_json(self._read_from(ad_path))
+            ad_cls = logbook.atom_detail_class(ad_data['type'])
+            return ad_cls.from_dict(ad_data['atom'])
 
         if lock:
-            return self._run_with_process_lock('task', _get)
+            return self._run_with_process_lock('atom', _get)
         else:
             return _get()
 
@@ -208,18 +181,18 @@ class Connection(base.Connection):
         def _get():
             fd_path = os.path.join(self._flow_path, uuid)
             meta_path = os.path.join(fd_path, 'metadata')
-            meta = jsonutils.loads(self._read_from(meta_path))
-            fd = p_utils.unformat_flow_detail(uuid, meta)
-            td_to_load = []
-            td_path = os.path.join(fd_path, 'tasks')
+            meta = misc.decode_json(self._read_from(meta_path))
+            fd = logbook.FlowDetail.from_dict(meta)
+            ad_to_load = []
+            ad_path = os.path.join(fd_path, 'atoms')
             try:
-                td_to_load = [f for f in os.listdir(td_path)
-                              if os.path.islink(os.path.join(td_path, f))]
+                ad_to_load = [f for f in os.listdir(ad_path)
+                              if os.path.islink(os.path.join(ad_path, f))]
             except EnvironmentError as e:
                 if e.errno != errno.ENOENT:
                     raise
-            for t_uuid in td_to_load:
-                fd.add(self._get_task_details(t_uuid))
+            for ad_uuid in ad_to_load:
+                fd.add(self._get_atom_details(ad_uuid))
             return fd
 
         if lock:
@@ -227,13 +200,13 @@ class Connection(base.Connection):
         else:
             return _get()
 
-    def _save_tasks_and_link(self, task_details, local_task_path):
-        for task_detail in task_details:
-            self._save_task_details(task_detail, ignore_missing=True)
-            src_td_path = os.path.join(self._task_path, task_detail.uuid)
-            target_td_path = os.path.join(local_task_path, task_detail.uuid)
+    def _save_atoms_and_link(self, atom_details, local_atom_path):
+        for atom_detail in atom_details:
+            self._save_atom_details(atom_detail, ignore_missing=True)
+            src_ad_path = os.path.join(self._atom_path, atom_detail.uuid)
+            target_ad_path = os.path.join(local_atom_path, atom_detail.uuid)
             try:
-                os.symlink(src_td_path, target_td_path)
+                os.symlink(src_ad_path, target_ad_path)
             except EnvironmentError as e:
                 if e.errno != errno.EEXIST:
                     raise
@@ -248,25 +221,23 @@ class Connection(base.Connection):
                 raise exc.NotFound("No flow details found with id: %s"
                                    % flow_detail.uuid)
         if e_fd is not None:
-            e_fd = p_utils.flow_details_merge(e_fd, flow_detail)
-            for td in flow_detail:
-                if e_fd.find(td.uuid) is None:
-                    e_fd.add(td)
+            e_fd = e_fd.merge(flow_detail)
+            for ad in flow_detail:
+                if e_fd.find(ad.uuid) is None:
+                    e_fd.add(ad)
             flow_detail = e_fd
         flow_path = os.path.join(self._flow_path, flow_detail.uuid)
         misc.ensure_tree(flow_path)
-        self._write_to(
-            os.path.join(flow_path, 'metadata'),
-            jsonutils.dumps(p_utils.format_flow_detail(flow_detail)))
+        self._write_to(os.path.join(flow_path, 'metadata'),
+                       jsonutils.dumps(flow_detail.to_dict()))
         if len(flow_detail):
-            task_path = os.path.join(flow_path, 'tasks')
-            misc.ensure_tree(task_path)
-            self._run_with_process_lock('task',
-                                        self._save_tasks_and_link,
-                                        list(flow_detail), task_path)
+            atom_path = os.path.join(flow_path, 'atoms')
+            misc.ensure_tree(atom_path)
+            self._run_with_process_lock('atom',
+                                        self._save_atoms_and_link,
+                                        list(flow_detail), atom_path)
         return flow_detail
 
-    @lock_utils.locked
     def update_flow_details(self, flow_detail):
         return self._run_with_process_lock("flow",
                                            self._save_flow_details,
@@ -292,18 +263,15 @@ class Connection(base.Connection):
         except exc.NotFound:
             pass
         if e_lb is not None:
-            e_lb = p_utils.logbook_merge(e_lb, book)
+            e_lb = e_lb.merge(book)
             for fd in book:
                 if e_lb.find(fd.uuid) is None:
                     e_lb.add(fd)
             book = e_lb
         book_path = os.path.join(self._book_path, book.uuid)
         misc.ensure_tree(book_path)
-        created_at = None
-        if e_lb is not None:
-            created_at = e_lb.created_at
-        self._write_to(os.path.join(book_path, 'metadata'), jsonutils.dumps(
-            p_utils.format_logbook(book, created_at=created_at)))
+        self._write_to(os.path.join(book_path, 'metadata'),
+                       jsonutils.dumps(book.to_dict(marshal_time=True)))
         if len(book):
             flow_path = os.path.join(book_path, 'flows')
             misc.ensure_tree(flow_path)
@@ -312,35 +280,42 @@ class Connection(base.Connection):
                                         list(book), flow_path)
         return book
 
-    @lock_utils.locked
     def save_logbook(self, book):
         return self._run_with_process_lock("book",
                                            self._save_logbook, book)
 
-    @lock_utils.locked
     def upgrade(self):
 
         def _step_create():
-            for d in (self._book_path, self._flow_path, self._task_path):
-                misc.ensure_tree(d)
+            for path in (self._book_path, self._flow_path, self._atom_path):
+                try:
+                    misc.ensure_tree(path)
+                except EnvironmentError as e:
+                    raise exc.StorageFailure("Unable to create logbooks"
+                                             " required child path %s" % path,
+                                             e)
 
-        misc.ensure_tree(self._backend.base_path)
-        misc.ensure_tree(self._backend.lock_path)
+        for path in (self._backend.base_path, self._backend.lock_path):
+            try:
+                misc.ensure_tree(path)
+            except EnvironmentError as e:
+                raise exc.StorageFailure("Unable to create logbooks required"
+                                         " path %s" % path, e)
+
         self._run_with_process_lock("init", _step_create)
 
-    @lock_utils.locked
     def clear_all(self):
 
         def _step_clear():
-            for d in (self._book_path, self._flow_path, self._task_path):
+            for d in (self._book_path, self._flow_path, self._atom_path):
                 if os.path.isdir(d):
                     shutil.rmtree(d)
 
-        def _step_task():
-            self._run_with_process_lock("task", _step_clear)
+        def _step_atom():
+            self._run_with_process_lock("atom", _step_clear)
 
         def _step_flow():
-            self._run_with_process_lock("flow", _step_task)
+            self._run_with_process_lock("flow", _step_atom)
 
         def _step_book():
             self._run_with_process_lock("book", _step_flow)
@@ -348,37 +323,42 @@ class Connection(base.Connection):
         # Acquire all locks by going through this little hierarchy.
         self._run_with_process_lock("init", _step_book)
 
-    @lock_utils.locked
     def destroy_logbook(self, book_uuid):
 
-        def _destroy_tasks(task_details):
-            for task_detail in task_details:
+        def _destroy_atoms(atom_details):
+            for atom_detail in atom_details:
+                atom_path = os.path.join(self._atom_path, atom_detail.uuid)
                 try:
-                    shutil.rmtree(os.path.join(self._task_path,
-                                               task_detail.uuid))
+                    shutil.rmtree(atom_path)
                 except EnvironmentError as e:
                     if e.errno != errno.ENOENT:
-                        raise
+                        raise exc.StorageFailure("Unable to remove atom"
+                                                 " directory %s" % atom_path,
+                                                 e)
 
         def _destroy_flows(flow_details):
             for flow_detail in flow_details:
-                self._run_with_process_lock("task", _destroy_tasks,
+                flow_path = os.path.join(self._flow_path, flow_detail.uuid)
+                self._run_with_process_lock("atom", _destroy_atoms,
                                             list(flow_detail))
                 try:
-                    shutil.rmtree(os.path.join(self._flow_path,
-                                               flow_detail.uuid))
+                    shutil.rmtree(flow_path)
                 except EnvironmentError as e:
                     if e.errno != errno.ENOENT:
-                        raise
+                        raise exc.StorageFailure("Unable to remove flow"
+                                                 " directory %s" % flow_path,
+                                                 e)
 
         def _destroy_book():
             book = self._get_logbook(book_uuid)
+            book_path = os.path.join(self._book_path, book.uuid)
             self._run_with_process_lock("flow", _destroy_flows, list(book))
             try:
-                shutil.rmtree(os.path.join(self._book_path, book.uuid))
+                shutil.rmtree(book_path)
             except EnvironmentError as e:
                 if e.errno != errno.ENOENT:
-                    raise
+                    raise exc.StorageFailure("Unable to remove book"
+                                             " directory %s" % book_path, e)
 
         # Acquire all locks by going through this little hierarchy.
         self._run_with_process_lock("book", _destroy_book)
@@ -387,13 +367,13 @@ class Connection(base.Connection):
         book_path = os.path.join(self._book_path, book_uuid)
         meta_path = os.path.join(book_path, 'metadata')
         try:
-            meta = jsonutils.loads(self._read_from(meta_path))
+            meta = misc.decode_json(self._read_from(meta_path))
         except EnvironmentError as e:
             if e.errno == errno.ENOENT:
                 raise exc.NotFound("No logbook found with id: %s" % book_uuid)
             else:
                 raise
-        lb = p_utils.unformat_logbook(book_uuid, meta)
+        lb = logbook.LogBook.from_dict(meta, unmarshal_time=True)
         fd_path = os.path.join(book_path, 'flows')
         fd_uuids = []
         try:
@@ -406,7 +386,6 @@ class Connection(base.Connection):
             lb.add(self._get_flow_details(fd_uuid))
         return lb
 
-    @lock_utils.locked
     def get_logbook(self, book_uuid):
         return self._run_with_process_lock("book",
                                            self._get_logbook, book_uuid)

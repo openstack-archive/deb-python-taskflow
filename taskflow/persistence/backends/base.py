@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Rackspace Hosting Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -19,6 +17,8 @@
 import abc
 
 import six
+
+from taskflow.persistence import logbook
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -77,11 +77,11 @@ class Connection(object):
         pass
 
     @abc.abstractmethod
-    def update_task_details(self, task_detail):
-        """Updates a given task details and returns the updated version.
+    def update_atom_details(self, atom_detail):
+        """Updates a given atom details and returns the updated version.
 
         NOTE(harlowja): the details that is to be updated must already have
-        been created by saving a flow details with the given task detail inside
+        been created by saving a flow details with the given atom detail inside
         of it.
         """
         pass
@@ -115,3 +115,10 @@ class Connection(object):
     def get_logbooks(self):
         """Return an iterable of logbook objects."""
         pass
+
+
+def _format_atom(atom_detail):
+    return {
+        'atom': atom_detail.to_dict(),
+        'type': logbook.atom_detail_type(atom_detail),
+    }

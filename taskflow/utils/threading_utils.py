@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -33,6 +31,6 @@ def get_optimal_thread_count():
         return multiprocessing.cpu_count() + 1
     except NotImplementedError:
         # NOTE(harlowja): apparently may raise so in this case we will
-        # just setup two threads since its hard to know what else we
+        # just setup two threads since it's hard to know what else we
         # should do in this situation.
         return 2

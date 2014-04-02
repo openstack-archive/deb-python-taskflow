@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,10 +15,7 @@
 #    under the License.
 
 import contextlib
-import copy
 import logging
-
-import six
 
 from taskflow.openstack.common import timeutils
 from taskflow.openstack.common import uuidutils
@@ -69,7 +64,7 @@ def create_flow_detail(flow, book=None, backend=None, meta=None):
     flow_id = uuidutils.generate_uuid()
     flow_name = getattr(flow, 'name', None)
     if flow_name is None:
-        LOG.warn("No name provided for flow %s (id %s)" % (flow, flow_id))
+        LOG.warn("No name provided for flow %s (id %s)", flow, flow_id)
         flow_name = flow_id
 
     flow_detail = logbook.FlowDetail(name=flow_name, uuid=flow_id)
@@ -92,110 +87,6 @@ def create_flow_detail(flow, book=None, backend=None, meta=None):
         return book.find(flow_id)
     else:
         return flow_detail
-
-
-def _copy_function(deep_copy):
-    if deep_copy:
-        return copy.deepcopy
-    else:
-        return lambda x: x
-
-
-def task_details_merge(td_e, td_new, deep_copy=False):
-    """Merges an existing task details with a new task details object.
-
-    The new task details fields, if they differ will replace the existing
-    objects fields (except name, version, uuid which can not be replaced).
-
-    If 'deep_copy' is True, fields are copied deeply (by value) if possible.
-    """
-    if td_e is td_new:
-        return td_e
-
-    copy_fn = _copy_function(deep_copy)
-    if td_e.state != td_new.state:
-        # NOTE(imelnikov): states are just strings, no need to copy.
-        td_e.state = td_new.state
-    if td_e.results != td_new.results:
-        td_e.results = copy_fn(td_new.results)
-    if td_e.failure != td_new.failure:
-        # NOTE(imelnikov): we can't just deep copy Failures, as they
-        # contain tracebacks, which are not copyable.
-        if deep_copy:
-            td_e.failure = td_new.failure.copy()
-        else:
-            td_e.failure = td_new.failure
-    if td_e.meta != td_new.meta:
-        td_e.meta = copy_fn(td_new.meta)
-    if td_e.version != td_new.version:
-        td_e.version = copy_fn(td_new.version)
-    return td_e
-
-
-def flow_details_merge(fd_e, fd_new, deep_copy=False):
-    """Merges an existing flow details with a new flow details object.
-
-    The new flow details fields, if they differ will replace the existing
-    objects fields (except name and uuid which can not be replaced).
-
-    If 'deep_copy' is True, fields are copied deeply (by value) if possible.
-    """
-    if fd_e is fd_new:
-        return fd_e
-
-    copy_fn = _copy_function(deep_copy)
-    if fd_e.meta != fd_new.meta:
-        fd_e.meta = copy_fn(fd_new.meta)
-    if fd_e.state != fd_new.state:
-        # NOTE(imelnikov): states are just strings, no need to copy.
-        fd_e.state = fd_new.state
-    return fd_e
-
-
-def logbook_merge(lb_e, lb_new, deep_copy=False):
-    """Merges an existing logbook with a new logbook object.
-
-    The new logbook fields, if they differ will replace the existing
-    objects fields (except name and uuid which can not be replaced).
-
-    If 'deep_copy' is True, fields are copied deeply (by value) if possible.
-    """
-    if lb_e is lb_new:
-        return lb_e
-
-    copy_fn = _copy_function(deep_copy)
-    if lb_e.meta != lb_new.meta:
-        lb_e.meta = copy_fn(lb_new.meta)
-    return lb_e
-
-
-def failure_to_dict(failure):
-    """Convert misc.Failure object to JSON-serializable dict."""
-    if not failure:
-        return None
-    if not isinstance(failure, misc.Failure):
-        raise TypeError('Failure object expected, but got %r'
-                        % failure)
-    return {
-        'exception_str': failure.exception_str,
-        'traceback_str': failure.traceback_str,
-        'exc_type_names': list(failure),
-        'version': 1
-    }
-
-
-def failure_from_dict(data):
-    """Restore misc.Failure object from dict.
-
-    The dict should be similar to what failure_to_dict() function produces.
-    """
-    if not data:
-        return None
-    version = data.pop('version', None)
-    if version != 1:
-        raise ValueError('Invalid version of saved Failure object: %r'
-                         % version)
-    return misc.Failure(**data)
 
 
 def _format_meta(metadata, indent):
@@ -227,17 +118,18 @@ def _format_shared(obj, indent):
     return lines
 
 
-def pformat_task_detail(task_detail, indent=0):
-    """Pretty formats a task detail."""
-    lines = ["%sTask: '%s'" % (" " * (indent), task_detail.name)]
-    lines.extend(_format_shared(task_detail, indent=indent + 1))
+def pformat_atom_detail(atom_detail, indent=0):
+    """Pretty formats a atom detail."""
+    detail_type = logbook.atom_detail_type(atom_detail)
+    lines = ["%s%s: '%s'" % (" " * (indent), detail_type, atom_detail.name)]
+    lines.extend(_format_shared(atom_detail, indent=indent + 1))
     lines.append("%s- version = %s"
-                 % (" " * (indent + 1), misc.get_version_string(task_detail)))
+                 % (" " * (indent + 1), misc.get_version_string(atom_detail)))
     lines.append("%s- results = %s"
-                 % (" " * (indent + 1), task_detail.results))
+                 % (" " * (indent + 1), atom_detail.results))
     lines.append("%s- failure = %s" % (" " * (indent + 1),
-                                       bool(task_detail.failure)))
-    lines.extend(_format_meta(task_detail.meta, indent=indent + 1))
+                                       bool(atom_detail.failure)))
+    lines.extend(_format_meta(atom_detail.meta, indent=indent + 1))
     return "\n".join(lines)
 
 
@@ -247,7 +139,7 @@ def pformat_flow_detail(flow_detail, indent=0):
     lines.extend(_format_shared(flow_detail, indent=indent + 1))
     lines.extend(_format_meta(flow_detail.meta, indent=indent + 1))
     for task_detail in flow_detail:
-        lines.append(pformat_task_detail(task_detail, indent=indent + 1))
+        lines.append(pformat_atom_detail(task_detail, indent=indent + 1))
     return "\n".join(lines)
 
 
@@ -267,74 +159,3 @@ def pformat(book, indent=0):
     for flow_detail in book:
         lines.append(pformat_flow_detail(flow_detail, indent=indent + 1))
     return "\n".join(lines)
-
-
-def _str_2_datetime(text):
-    """Converts an iso8601 string/text into a datetime object (or none)."""
-    if text is None:
-        return None
-    if not isinstance(text, six.string_types):
-        raise ValueError("Can only convert strings into a datetime object and"
-                         " not %r" % (text))
-    if not len(text):
-        return None
-    return timeutils.parse_isotime(text)
-
-
-def format_task_detail(td):
-    return {
-        'failure': failure_to_dict(td.failure),
-        'meta': td.meta,
-        'name': td.name,
-        'results': td.results,
-        'state': td.state,
-        'version': td.version,
-    }
-
-
-def unformat_task_detail(uuid, td_data):
-    td = logbook.TaskDetail(name=td_data['name'], uuid=uuid)
-    td.state = td_data.get('state')
-    td.results = td_data.get('results')
-    td.failure = failure_from_dict(td_data.get('failure'))
-    td.meta = td_data.get('meta')
-    td.version = td_data.get('version')
-    return td
-
-
-def format_flow_detail(fd):
-    return {
-        'name': fd.name,
-        'meta': fd.meta,
-        'state': fd.state,
-    }
-
-
-def unformat_flow_detail(uuid, fd_data):
-    fd = logbook.FlowDetail(name=fd_data['name'], uuid=uuid)
-    fd.state = fd_data.get('state')
-    fd.meta = fd_data.get('meta')
-    return fd
-
-
-def format_logbook(lb, created_at=None):
-    lb_data = {
-        'name': lb.name,
-        'meta': lb.meta,
-    }
-    if created_at:
-        lb_data['created_at'] = timeutils.isotime(at=created_at)
-        lb_data['updated_at'] = timeutils.isotime()
-    else:
-        lb_data['created_at'] = timeutils.isotime()
-        lb_data['updated_at'] = None
-    return lb_data
-
-
-def unformat_logbook(uuid, lb_data):
-    lb = logbook.LogBook(name=lb_data['name'],
-                         uuid=uuid,
-                         updated_at=_str_2_datetime(lb_data['updated_at']),
-                         created_at=_str_2_datetime(lb_data['created_at']))
-    lb.meta = lb_data.get('meta')
-    return lb

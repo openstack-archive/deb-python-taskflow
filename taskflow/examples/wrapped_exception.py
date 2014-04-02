@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012-2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -16,7 +14,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import contextlib
 import logging
 import os
 import sys
@@ -36,6 +33,7 @@ import taskflow.engines
 from taskflow import exceptions
 from taskflow.patterns import unordered_flow as uf
 from taskflow import task
+from taskflow.tests import utils
 from taskflow.utils import misc
 
 # INTRO: In this example we create two tasks which can trigger exceptions
@@ -60,20 +58,6 @@ def print_wrapped(text):
     print("-" * (len(text)))
     print(text)
     print("-" * (len(text)))
-
-
-@contextlib.contextmanager
-def wrap_all_failures():
-    """Convert any exceptions to WrappedFailure.
-
-    When you expect several failures, it may be convenient
-    to wrap any exception with WrappedFailure in order to
-    unify error handling.
-    """
-    try:
-        yield
-    except Exception:
-        raise exceptions.WrappedFailure([misc.Failure()])
 
 
 class FirstException(Exception):
@@ -112,7 +96,7 @@ def run(**store):
         SecondTask()
     )
     try:
-        with wrap_all_failures():
+        with utils.wrap_all_failures():
             taskflow.engines.run(flow, store=store,
                                  engine_conf='parallel')
     except exceptions.WrappedFailure as ex:

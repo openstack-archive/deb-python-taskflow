@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2012 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -49,9 +47,9 @@ class ArgumentsPassingTest(utils.EngineTestBase):
         })
 
     def test_save_dict(self):
-        flow = utils.TaskMultiDictk(provides=set(['badger',
-                                                  'mushroom',
-                                                  'snake']))
+        flow = utils.TaskMultiDict(provides=set(['badger',
+                                                 'mushroom',
+                                                 'snake']))
         engine = self._make_engine(flow)
         engine.run()
         self.assertEqual(engine.storage.fetch_all(), {

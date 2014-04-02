@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2013 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -56,6 +54,16 @@ class EngineBase(object):
         """Compiles the contained flow into a structure which the engine can
         use to run or if this can not be done then an exception is thrown
         indicating why this compilation could not be achieved.
+        """
+
+    @abc.abstractmethod
+    def prepare(self):
+        """Performs any pre-run, but post-compilation actions.
+
+        NOTE(harlowja): During preparation it is currently assumed that the
+        underlying storage will be initialized, all final dependencies
+        will be verified, the tasks will be reset and the engine will enter
+        the PENDING state.
         """
 
     @abc.abstractmethod
