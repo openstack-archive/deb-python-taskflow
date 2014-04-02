@@ -7,10 +7,10 @@ Uploaders: Julien Danjou <acid@debian.org>,
            Mehdi Abaakouk <sileht@sileht.net>,
            Sebastien Badia <seb@sebian.fr>
 Build-Depends: debhelper (>= 9),
+               openstack-pkg-tools,
                python-all (>= 2.6.6-3~),
                python-pbr (>= 0.5.21),
-               python-setuptools,
-               openstack-pkg-tools
+               python-setuptools
 Build-depends-indep: alembic (>= 0.4.1),
                      pylint (>= 0.25),
                      python-anyjson (>= 0.3.3),
