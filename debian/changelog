@@ -1,4 +1,4 @@
-python-taskflow (0.2-1) UNRELEASED; urgency=medium
+python-taskflow (0.2-1) experimental; urgency=medium
 
   * New upstream release.
   * Increased the version required of python-six, python-iso8601,
