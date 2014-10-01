@@ -4,6 +4,8 @@ python-taskflow (0.4.0-1) experimental; urgency=medium
   * Updated (build-)depends for this release.
   * Do not support python 2.6 because of the need for ordereddict. Therefore
     setting-up X-Python-Version: >= 2.7.
+  * Add patch to disable unit tests using Kombu 3.x, which isn't available
+    normally with OpenStack Juno.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 01 Oct 2014 16:31:11 +0800
 
