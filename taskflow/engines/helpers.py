@@ -31,15 +31,23 @@ from taskflow.utils import reflection
 ENGINES_NAMESPACE = 'taskflow.engines'
 
 
+def _fetch_factory(factory_name):
+    try:
+        return importutils.import_class(factory_name)
+    except (ImportError, ValueError) as e:
+        raise ImportError("Could not import factory %r: %s"
+                          % (factory_name, e))
+
+
 def _fetch_validate_factory(flow_factory):
     if isinstance(flow_factory, six.string_types):
-        factory_fun = importutils.import_class(flow_factory)
+        factory_fun = _fetch_factory(flow_factory)
         factory_name = flow_factory
     else:
         factory_fun = flow_factory
         factory_name = reflection.get_callable_name(flow_factory)
         try:
-            reimported = importutils.import_class(factory_name)
+            reimported = _fetch_factory(factory_name)
             assert reimported == factory_fun
         except (ImportError, AssertionError):
             raise ValueError('Flow factory %r is not reimportable by name %s'
@@ -50,7 +58,7 @@ def _fetch_validate_factory(flow_factory):
 def load(flow, store=None, flow_detail=None, book=None,
          engine_conf=None, backend=None, namespace=ENGINES_NAMESPACE,
          **kwargs):
-    """Load flow into engine.
+    """Load a flow into an engine.
 
     This function creates and prepares engine to run the
     flow. All that is left is to run the engine with 'run()' method.
@@ -151,8 +159,7 @@ def run(flow, store=None, flow_detail=None, book=None,
 def save_factory_details(flow_detail,
                          flow_factory, factory_args, factory_kwargs,
                          backend=None):
-    """Saves the given factories reimportable name, args, kwargs into the
-    flow detail.
+    """Saves the given factories reimportable attributes into the flow detail.
 
     This function saves the factory name, arguments, and keyword arguments
     into the given flow details object  and if a backend is provided it will
@@ -227,9 +234,11 @@ def load_from_factory(flow_factory, factory_args=None, factory_kwargs=None,
 
 
 def flow_from_detail(flow_detail):
-    """Recreate flow previously loaded with load_form_factory.
+    """Reloads a flow previously saved.
 
-    Gets flow factory name from metadata, calls it to recreate the flow.
+    Gets the flow factories name and any arguments and keyword arguments from
+    the flow details metadata, and then calls that factory to recreate the
+    flow.
 
     :param flow_detail: FlowDetail that holds state of the flow to load
     """
@@ -241,7 +250,7 @@ def flow_from_detail(flow_detail):
                          % (flow_detail.name, flow_detail.uuid))
 
     try:
-        factory_fun = importutils.import_class(factory_data['name'])
+        factory_fun = _fetch_factory(factory_data['name'])
     except (KeyError, ImportError):
         raise ImportError('Could not import factory for flow %s %s'
                           % (flow_detail.name, flow_detail.uuid))
@@ -253,10 +262,10 @@ def flow_from_detail(flow_detail):
 
 def load_from_detail(flow_detail, store=None, engine_conf=None, backend=None,
                      namespace=ENGINES_NAMESPACE, **kwargs):
-    """Reload flow previously loaded with load_form_factory function.
+    """Reloads an engine previously saved.
 
-    Gets flow factory name from metadata, calls it to recreate the flow
-    and loads flow into engine with load().
+    This reloads the flow using the flow_from_detail() function and then calls
+    into the load() function to create an engine from that flow.
 
     :param flow_detail: FlowDetail that holds state of the flow to load
     :param store: dict -- data to put to storage to satisfy flow requirements

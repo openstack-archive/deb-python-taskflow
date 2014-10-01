@@ -20,8 +20,8 @@ import six
 from taskflow.conductors import base
 from taskflow import exceptions as excp
 from taskflow.listeners import logging as logging_listener
+from taskflow.types import timing as tt
 from taskflow.utils import lock_utils
-from taskflow.utils import misc
 
 LOG = logging.getLogger(__name__)
 WAIT_TIMEOUT = 0.5
@@ -58,8 +58,8 @@ class SingleThreadedConductor(base.Conductor):
         if wait_timeout is None:
             wait_timeout = WAIT_TIMEOUT
         if isinstance(wait_timeout, (int, float) + six.string_types):
-            self._wait_timeout = misc.Timeout(float(wait_timeout))
-        elif isinstance(wait_timeout, misc.Timeout):
+            self._wait_timeout = tt.Timeout(float(wait_timeout))
+        elif isinstance(wait_timeout, tt.Timeout):
             self._wait_timeout = wait_timeout
         else:
             raise ValueError("Invalid timeout literal: %s" % (wait_timeout))
@@ -67,10 +67,13 @@ class SingleThreadedConductor(base.Conductor):
 
     @lock_utils.locked
     def stop(self, timeout=None):
-        """Requests the conductor to stop dispatching and returns whether the
-        stop request was successfully completed. If the dispatching is still
-        occurring then False is returned otherwise True will be returned to
-        signal that the conductor is no longer dispatching job requests.
+        """Requests the conductor to stop dispatching.
+
+        This method can be used to request that a conductor stop its
+        consumption & dispatching loop. It returns whether the stop request
+        was successfully completed. If the dispatching is still occurring
+        then False is returned otherwise True will be returned to signal that
+        the conductor is no longer consuming & dispatching job requests.
 
         NOTE(harlowja): If a timeout is provided the dispatcher loop may
         not have ceased by the timeout reached (the request to cease will
@@ -93,17 +96,24 @@ class SingleThreadedConductor(base.Conductor):
                 engine.run()
             except excp.WrappedFailure as e:
                 if all((f.check(*NO_CONSUME_EXCEPTIONS) for f in e)):
-                    LOG.warn("Job execution failed (consumption being"
-                             " skipped): %s", job, exc_info=True)
                     consume = False
-                else:
-                    LOG.warn("Job execution failed: %s", job, exc_info=True)
+                if LOG.isEnabledFor(logging.WARNING):
+                    if consume:
+                        LOG.warn("Job execution failed (consumption being"
+                                 " skipped): %s [%s failures]", job, len(e))
+                    else:
+                        LOG.warn("Job execution failed (consumption"
+                                 " proceeding): %s [%s failures]", job, len(e))
+                    # Show the failure/s + traceback (if possible)...
+                    for i, f in enumerate(e):
+                        LOG.warn("%s. %s", i + 1, f.pformat(traceback=True))
             except NO_CONSUME_EXCEPTIONS:
                 LOG.warn("Job execution failed (consumption being"
                          " skipped): %s", job, exc_info=True)
                 consume = False
             except Exception:
-                LOG.warn("Job execution failed: %s", job, exc_info=True)
+                LOG.warn("Job execution failed (consumption proceeding): %s",
+                         job, exc_info=True)
             else:
                 LOG.info("Job completed successfully: %s", job)
         return consume

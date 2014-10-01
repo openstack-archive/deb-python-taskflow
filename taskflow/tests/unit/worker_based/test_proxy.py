@@ -14,9 +14,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
 import socket
 import threading
+
+import mock
 
 from taskflow.engines.worker_based import proxy
 from taskflow import test
@@ -65,7 +66,6 @@ class TestProxy(test.MockTestCase):
         self.conn_inst_mock.Consumer.return_value.__exit__ = mock.MagicMock()
 
         # other mocking
-        self.on_message_mock = mock.MagicMock(name='on_message')
         self.on_wait_mock = mock.MagicMock(name='on_wait')
         self.master_mock.attach_mock(self.on_wait_mock, 'on_wait')
 
@@ -84,7 +84,7 @@ class TestProxy(test.MockTestCase):
                             auto_delete=True,
                             channel=self.conn_inst_mock),
             mock.call.connection.Consumer(queues=self.queue_inst_mock,
-                                          callbacks=[self.on_message_mock]),
+                                          callbacks=[mock.ANY]),
             mock.call.connection.Consumer().__enter__(),
         ] + calls + [
             mock.call.connection.Consumer().__exit__(exc_type, mock.ANY,
@@ -94,8 +94,8 @@ class TestProxy(test.MockTestCase):
     def proxy(self, reset_master_mock=False, **kwargs):
         proxy_kwargs = dict(topic=self.topic,
                             exchange_name=self.exchange_name,
-                            on_message=self.on_message_mock,
-                            url=self.broker_url)
+                            url=self.broker_url,
+                            type_handlers={})
         proxy_kwargs.update(kwargs)
         p = proxy.Proxy(**proxy_kwargs)
         if reset_master_mock:

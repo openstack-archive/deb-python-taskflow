@@ -84,9 +84,7 @@ class ExecutionFailure(TaskFlowException):
 
 
 class RequestTimeout(ExecutionFailure):
-    """Raised when a worker request was not finished within an allotted
-    timeout.
-    """
+    """Raised when a worker request was not finished within allotted time."""
 
 
 class InvalidState(ExecutionFailure):
@@ -129,6 +127,10 @@ class Empty(TaskFlowException):
 
 class MultipleChoices(TaskFlowException):
     """Raised when some decision can't be made due to many possible choices."""
+
+
+class InvalidFormat(TaskFlowException):
+    """Raised when some object/entity is not in the expected format."""
 
 
 # Others.

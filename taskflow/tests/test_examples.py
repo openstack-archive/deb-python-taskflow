@@ -24,7 +24,7 @@ extension; then it will be checked that output did not change.
 
 When this module is used as main module, output for all examples are
 generated. Please note that this will break tests as output for most
-examples is indeterministic.
+examples is indeterministic (due to hash randomization for example).
 """
 
 
@@ -91,8 +91,12 @@ def list_examples():
 class ExamplesTestCase(taskflow.test.TestCase):
     @classmethod
     def update(cls):
-        """For each example, adds on a test method that the testing framework
-        will then run.
+        """For each example, adds on a test method.
+
+        This newly created test method will then be activated by the testing
+        framework when it scans for and runs tests. This makes for a elegant
+        and simple way to ensure that all of the provided examples
+        actually work.
         """
         def add_test_method(name, method_name):
             def test_example(self):

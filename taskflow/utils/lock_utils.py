@@ -48,21 +48,35 @@ def try_lock(lock):
 
 
 def locked(*args, **kwargs):
-    """A decorator that looks for a given attribute (typically a lock or a list
-    of locks) and before executing the decorated function uses the given lock
-    or list of locks as a context manager, automatically releasing on exit.
+    """A locking decorator.
+
+    It will look for a provided attribute (typically a lock or a list
+    of locks) on the first argument of the function decorated (typically this
+    is the 'self' object) and before executing the decorated function it
+    activates the given lock or list of locks as a context manager,
+    automatically releasing that lock on exit.
+
+    NOTE(harlowja): if no attribute is provided then by default the attribute
+    named '_lock' is looked for in the instance object this decorator is
+    attached to.
+
+    NOTE(harlowja): when we get the wrapt module approved we can address the
+    correctness of this decorator with regards to classmethods, to keep sanity
+    and correctness it is recommended to avoid using this on classmethods, once
+    https://review.openstack.org/#/c/94754/ is merged this will be refactored
+    and that use-case can be provided in a correct manner.
     """
 
     def decorator(f):
         attr_name = kwargs.get('lock', '_lock')
 
-        @misc.wraps(f)
-        def wrapper(*args, **kwargs):
-            lock = getattr(args[0], attr_name)
+        @six.wraps(f)
+        def wrapper(self, *args, **kwargs):
+            lock = getattr(self, attr_name)
             if isinstance(lock, (tuple, list)):
                 lock = MultiLock(locks=list(lock))
             with lock:
-                return f(*args, **kwargs)
+                return f(self, *args, **kwargs)
 
         return wrapper
 
@@ -244,8 +258,11 @@ class ReaderWriterLock(_ReaderWriterLockBase):
 
 
 class DummyReaderWriterLock(_ReaderWriterLockBase):
-    """A dummy reader/writer lock that doesn't lock anything but provides same
-    functions as a normal reader/writer lock class.
+    """A dummy reader/writer lock.
+
+    This dummy lock doesn't lock anything but provides the same functions as a
+    normal reader/writer lock class and can be useful in unit tests or other
+    similar scenarios (do *not* use it if locking is actually required).
     """
     @contextlib.contextmanager
     def write_lock(self):
@@ -271,11 +288,10 @@ class DummyReaderWriterLock(_ReaderWriterLockBase):
 
 
 class MultiLock(object):
-    """A class which can attempt to obtain many locks at once and release
-    said locks when exiting.
+    """A class which attempts to obtain & release many locks at once.
 
-    Useful as a context manager around many locks (instead of having to nest
-    said individual context managers).
+    It is typically useful as a context manager around many locks (instead of
+    having to nest individual lock context managers).
     """
 
     def __init__(self, locks):
@@ -318,7 +334,9 @@ class MultiLock(object):
 
 
 class _InterProcessLock(object):
-    """Lock implementation which allows multiple locks, working around
+    """An interprocess locking implementation.
+
+    This is a lock implementation which allows multiple locks, working around
     issues like bugs.debian.org/cgi-bin/bugreport.cgi?bug=632857 and does
     not require any cleanup. Since the lock is always held on a file
     descriptor rather than outside of the process, the lock gets dropped
@@ -377,7 +395,6 @@ class _InterProcessLock(object):
         try:
             self.unlock()
             self.lockfile.close()
-            # This is fixed in: https://review.openstack.org/70506
             LOG.debug('Released file lock "%s"', self.fname)
         except IOError:
             LOG.exception("Could not release the acquired lock `%s`",
@@ -385,6 +402,9 @@ class _InterProcessLock(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
+
+    def exists(self):
+        return os.path.exists(self.fname)
 
     def trylock(self):
         raise NotImplementedError()

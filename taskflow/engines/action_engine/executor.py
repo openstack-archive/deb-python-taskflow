@@ -31,11 +31,14 @@ REVERTED = 'reverted'
 def _execute_task(task, arguments, progress_callback):
     with task.autobind('update_progress', progress_callback):
         try:
+            task.pre_execute()
             result = task.execute(**arguments)
         except Exception:
             # NOTE(imelnikov): wrap current exception with Failure
             # object and return it.
             result = misc.Failure()
+        finally:
+            task.post_execute()
     return (task, EXECUTED, result)
 
 
@@ -45,11 +48,14 @@ def _revert_task(task, arguments, result, failures, progress_callback):
     kwargs['flow_failures'] = failures
     with task.autobind('update_progress', progress_callback):
         try:
+            task.pre_revert()
             result = task.revert(**kwargs)
         except Exception:
             # NOTE(imelnikov): wrap current exception with Failure
             # object and return it.
             result = misc.Failure()
+        finally:
+            task.post_revert()
     return (task, REVERTED, result)
 
 
@@ -105,13 +111,14 @@ class SerialTaskExecutor(TaskExecutorBase):
 class ParallelTaskExecutor(TaskExecutorBase):
     """Executes tasks in parallel.
 
-    Submits tasks to executor which should provide interface similar
+    Submits tasks to an executor which should provide an interface similar
     to concurrent.Futures.Executor.
     """
 
-    def __init__(self, executor=None):
+    def __init__(self, executor=None, max_workers=None):
         self._executor = executor
-        self._own_executor = executor is None
+        self._max_workers = max_workers
+        self._create_executor = executor is None
 
     def execute_task(self, task, task_uuid, arguments, progress_callback=None):
         return self._executor.submit(
@@ -127,11 +134,14 @@ class ParallelTaskExecutor(TaskExecutorBase):
         return async_utils.wait_for_any(fs, timeout)
 
     def start(self):
-        if self._own_executor:
-            thread_count = threading_utils.get_optimal_thread_count()
-            self._executor = futures.ThreadPoolExecutor(thread_count)
+        if self._create_executor:
+            if self._max_workers is not None:
+                max_workers = self._max_workers
+            else:
+                max_workers = threading_utils.get_optimal_thread_count()
+            self._executor = futures.ThreadPoolExecutor(max_workers)
 
     def stop(self):
-        if self._own_executor:
+        if self._create_executor:
             self._executor.shutdown(wait=True)
             self._executor = None

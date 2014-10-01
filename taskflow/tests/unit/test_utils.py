@@ -18,7 +18,9 @@ import collections
 import functools
 import inspect
 import sys
-import time
+
+import six
+import testtools
 
 from taskflow import states
 from taskflow import test
@@ -112,17 +114,22 @@ class GetCallableNameTest(test.TestCase):
 
     def test_method(self):
         name = reflection.get_callable_name(Class.method)
-        self.assertEqual(name, '.'.join((__name__, 'method')))
+        self.assertEqual(name, '.'.join((__name__, 'Class', 'method')))
 
     def test_instance_method(self):
         name = reflection.get_callable_name(Class().method)
         self.assertEqual(name, '.'.join((__name__, 'Class', 'method')))
 
     def test_static_method(self):
-        # NOTE(imelnikov): static method are just functions, class name
-        # is not recorded anywhere in them.
         name = reflection.get_callable_name(Class.static_method)
-        self.assertEqual(name, '.'.join((__name__, 'static_method')))
+        if six.PY3:
+            self.assertEqual(name,
+                             '.'.join((__name__, 'Class', 'static_method')))
+        else:
+            # NOTE(imelnikov): static method are just functions, class name
+            # is not recorded anywhere in them.
+            self.assertEqual(name,
+                             '.'.join((__name__, 'static_method')))
 
     def test_class_method(self):
         name = reflection.get_callable_name(Class.class_method)
@@ -140,6 +147,46 @@ class GetCallableNameTest(test.TestCase):
         name = reflection.get_callable_name(CallableClass().__call__)
         self.assertEqual(name, '.'.join((__name__, 'CallableClass',
                                          '__call__')))
+
+
+# These extended/special case tests only work on python 3, due to python 2
+# being broken/incorrect with regard to these special cases...
+@testtools.skipIf(not six.PY3, 'python 3.x is not currently available')
+class GetCallableNameTestExtended(test.TestCase):
+    # Tests items in http://legacy.python.org/dev/peps/pep-3155/
+
+    class InnerCallableClass(object):
+        def __call__(self):
+            pass
+
+    def test_inner_callable_class(self):
+        obj = self.InnerCallableClass()
+        name = reflection.get_callable_name(obj.__call__)
+        expected_name = '.'.join((__name__, 'GetCallableNameTestExtended',
+                                  'InnerCallableClass', '__call__'))
+        self.assertEqual(expected_name, name)
+
+    def test_inner_callable_function(self):
+        def a():
+
+            def b():
+                pass
+
+            return b
+
+        name = reflection.get_callable_name(a())
+        expected_name = '.'.join((__name__, 'GetCallableNameTestExtended',
+                                  'test_inner_callable_function', '<locals>',
+                                  'a', '<locals>', 'b'))
+        self.assertEqual(expected_name, name)
+
+    def test_inner_class(self):
+        obj = self.InnerCallableClass()
+        name = reflection.get_callable_name(obj)
+        expected_name = '.'.join((__name__,
+                                  'GetCallableNameTestExtended',
+                                  'InnerCallableClass'))
+        self.assertEqual(expected_name, name)
 
 
 class NotifierTest(test.TestCase):
@@ -494,45 +541,49 @@ class IsValidAttributeNameTestCase(test.TestCase):
         self.assertFalse(misc.is_valid_attribute_name('mañana'))
 
 
-class StopWatchUtilsTest(test.TestCase):
-    def test_no_states(self):
-        watch = misc.StopWatch()
-        self.assertRaises(RuntimeError, watch.stop)
-        self.assertRaises(RuntimeError, watch.resume)
+class UriParseTest(test.TestCase):
+    def test_parse(self):
+        url = "zookeeper://192.168.0.1:2181/a/b/?c=d"
+        parsed = misc.parse_uri(url)
+        self.assertEqual('zookeeper', parsed.scheme)
+        self.assertEqual(2181, parsed.port)
+        self.assertEqual('192.168.0.1', parsed.hostname)
+        self.assertEqual('', parsed.fragment)
+        self.assertEqual('/a/b/', parsed.path)
+        self.assertEqual({'c': 'd'}, parsed.params)
 
-    def test_expiry(self):
-        watch = misc.StopWatch(0.1)
-        watch.start()
-        time.sleep(0.2)
-        self.assertTrue(watch.expired())
+    def test_multi_params(self):
+        url = "mysql://www.yahoo.com:3306/a/b/?c=d&c=e"
+        parsed = misc.parse_uri(url, query_duplicates=True)
+        self.assertEqual({'c': ['d', 'e']}, parsed.params)
 
-    def test_no_expiry(self):
-        watch = misc.StopWatch(0.1)
-        watch.start()
-        self.assertFalse(watch.expired())
+    def test_port_provided(self):
+        url = "rabbitmq://www.yahoo.com:5672"
+        parsed = misc.parse_uri(url)
+        self.assertEqual('rabbitmq', parsed.scheme)
+        self.assertEqual('www.yahoo.com', parsed.hostname)
+        self.assertEqual(5672, parsed.port)
+        self.assertEqual('', parsed.path)
 
-    def test_elapsed(self):
-        watch = misc.StopWatch()
-        watch.start()
-        time.sleep(0.2)
-        # NOTE(harlowja): Allow for a slight variation by using 0.19.
-        self.assertGreaterEqual(0.19, watch.elapsed())
+    def test_ipv6_host(self):
+        url = "rsync://[2001:db8:0:1]:873"
+        parsed = misc.parse_uri(url)
+        self.assertEqual('rsync', parsed.scheme)
+        self.assertEqual('2001:db8:0:1', parsed.hostname)
+        self.assertEqual(873, parsed.port)
 
-    def test_pause_resume(self):
-        watch = misc.StopWatch()
-        watch.start()
-        time.sleep(0.05)
-        watch.stop()
-        elapsed = watch.elapsed()
-        time.sleep(0.05)
-        self.assertAlmostEqual(elapsed, watch.elapsed())
-        watch.resume()
-        self.assertNotEqual(elapsed, watch.elapsed())
+    def test_user_password(self):
+        url = "rsync://test:test_pw@www.yahoo.com:873"
+        parsed = misc.parse_uri(url)
+        self.assertEqual('test', parsed.username)
+        self.assertEqual('test_pw', parsed.password)
+        self.assertEqual('www.yahoo.com', parsed.hostname)
 
-    def test_context_manager(self):
-        with misc.StopWatch() as watch:
-            time.sleep(0.05)
-        self.assertGreater(0.01, watch.elapsed())
+    def test_user(self):
+        url = "rsync://test@www.yahoo.com:873"
+        parsed = misc.parse_uri(url)
+        self.assertEqual('test', parsed.username)
+        self.assertEqual(None, parsed.password)
 
 
 class UriParseTest(test.TestCase):

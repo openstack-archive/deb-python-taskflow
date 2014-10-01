@@ -20,7 +20,6 @@ import contextlib
 import copy
 import datetime
 import errno
-import functools
 import inspect
 import keyword
 import logging
@@ -28,7 +27,6 @@ import os
 import re
 import string
 import sys
-import threading
 import time
 import traceback
 
@@ -50,9 +48,11 @@ _SCHEME_REGEX = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
 
 
 def merge_uri(uri_pieces, conf):
-    """Merges the username, password, hostname, and query params of a uri into
-    the given configuration (does not overwrite the configuration keys if they
-    already exist) and returns the adjusted configuration.
+    """Merges a parsed uri into the given configuration dictionary.
+
+    Merges the username, password, hostname, and query params of a uri into
+    the given configuration (it does not overwrite the configuration keys if
+    they already exist) and returns the adjusted configuration.
 
     NOTE(harlowja): does not merge the path, scheme or fragment.
     """
@@ -72,9 +72,7 @@ def merge_uri(uri_pieces, conf):
 
 
 def parse_uri(uri, query_duplicates=False):
-    """Parses a uri into its components and returns a dictionary containing
-    those components.
-    """
+    """Parses a uri into its components."""
     # Do some basic validation before continuing...
     if not isinstance(uri, six.string_types):
         raise TypeError("Can only parse string types to uri data, "
@@ -107,26 +105,15 @@ def parse_uri(uri, query_duplicates=False):
             query_params = tmp_query_params
     else:
         query_params = {}
-    uri_pieces = {
-        'scheme': parsed.scheme,
-        'username': parsed.username,
-        'password': parsed.password,
-        'fragment': parsed.fragment,
-        'path': parsed.path,
-        'params': query_params,
-    }
-    for k in ('hostname', 'port'):
-        try:
-            uri_pieces[k] = getattr(parsed, k)
-        except (IndexError, ValueError):
-            # The underlying network_utils throws when the host string is empty
-            # which it may be in cases where it is not provided.
-            #
-            # NOTE(harlowja): when https://review.openstack.org/#/c/86921/ gets
-            # merged we can just remove this since that error will no longer
-            # occur.
-            uri_pieces[k] = None
-    return AttrDict(**uri_pieces)
+    return AttrDict(
+        scheme=parsed.scheme,
+        username=parsed.username,
+        password=parsed.password,
+        fragment=parsed.fragment,
+        path=parsed.path,
+        params=query_params,
+        hostname=parsed.hostname,
+        port=parsed.port)
 
 
 def binary_encode(text, encoding='utf-8'):
@@ -176,9 +163,17 @@ def decode_json(raw_data, root_types=(dict,)):
 
 
 class cachedproperty(object):
-    """Descriptor that can be placed on instance methods to translate
+    """A descriptor property that is only evaluated once..
+
+    This caching descriptor can be placed on instance methods to translate
     those methods into properties that will be cached in the instance (avoiding
-    repeated creation checking logic to do the equivalent).
+    repeated attribute checking logic to do the equivalent).
+
+    NOTE(harlowja): by default the property that will be saved will be under
+    the decorated methods name prefixed with an underscore. For example if we
+    were to attach this descriptor to an instance method 'get_thing(self)' the
+    cached property would be stored under '_get_thing' in the self object
+    after the first call to 'get_thing' occurs.
     """
     def __init__(self, fget):
         # If a name is provided (as an argument) then this will be the string
@@ -225,17 +220,9 @@ def wallclock():
     return time.time()
 
 
-def wraps(fn):
-    """This will not be needed in python 3.2 or greater which already has this
-    built-in to its functools.wraps method.
-    """
-
-    def wrapper(f):
-        f = functools.wraps(fn)(f)
-        f.__wrapped__ = getattr(fn, '__wrapped__', fn)
-        return f
-
-    return wrapper
+def millis_to_datetime(milliseconds):
+    """Converts number of milliseconds (from epoch) into a datetime object."""
+    return datetime.datetime.fromtimestamp(float(milliseconds) / 1000)
 
 
 def millis_to_datetime(milliseconds):
@@ -313,9 +300,7 @@ _ASCII_WORD_SYMBOLS = frozenset(string.ascii_letters + string.digits + '_')
 
 
 def is_valid_attribute_name(name, allow_self=False, allow_hidden=False):
-    """Validates that a string name is a valid/invalid python attribute
-    name.
-    """
+    """Checks that a string is a valid/invalid python attribute name."""
     return all((
         isinstance(name, six.string_types),
         len(name) > 0,
@@ -332,8 +317,12 @@ def is_valid_attribute_name(name, allow_self=False, allow_hidden=False):
 
 
 class AttrDict(dict):
-    """Helper utility dict sub-class to create a class that can be accessed by
-    attribute name from a dictionary that contains a set of keys and values.
+    """Dictionary subclass that allows for attribute based access.
+
+    This subclass allows for accessing a dictionaries keys and values by
+    accessing those keys as regular attributes. Keys that are not valid python
+    attribute names can not of course be acccessed/set (those keys must be
+    accessed/set by the traditional dictionary indexing operators instead).
     """
     NO_ATTRS = tuple(reflection.get_member_names(dict))
 
@@ -366,35 +355,13 @@ class AttrDict(dict):
         self[name] = value
 
 
-class Timeout(object):
-    """An object which represents a timeout.
-
-    This object has the ability to be interrupted before the actual timeout
-    is reached.
-    """
-    def __init__(self, timeout):
-        if timeout < 0:
-            raise ValueError("Timeout must be >= 0 and not %s" % (timeout))
-        self._timeout = timeout
-        self._event = threading.Event()
-
-    def interrupt(self):
-        self._event.set()
-
-    def is_stopped(self):
-        return self._event.is_set()
-
-    def wait(self):
-        self._event.wait(self._timeout)
-
-    def reset(self):
-        self._event.clear()
-
-
 class ExponentialBackoff(object):
-    """An iterable object that will yield back an exponential delay sequence
-    provided an exponent and a number of items to yield. This object may be
-    iterated over multiple times (yielding the same sequence each time).
+    """An iterable object that will yield back an exponential delay sequence.
+
+    This objects provides for a configurable exponent, count of numbers
+    to generate, and a maximum number that will be returned. This object may
+    also be iterated over multiple times (yielding the same sequence each
+    time).
     """
     def __init__(self, count, exponent=2, max_backoff=3600):
         self.count = max(0, int(count))
@@ -409,18 +376,6 @@ class ExponentialBackoff(object):
 
     def __str__(self):
         return "ExponentialBackoff: %s" % ([str(v) for v in self])
-
-
-def as_bool(val):
-    """Converts an arbitrary value into a boolean."""
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, six.string_types):
-        if val.lower() in ('f', 'false', '0', 'n', 'no'):
-            return False
-        if val.lower() in ('t', 'true', '1', 'y', 'yes'):
-            return True
-    return bool(val)
 
 
 def as_int(obj, quiet=False):
@@ -459,91 +414,13 @@ def ensure_tree(path):
             raise
 
 
-class StopWatch(object):
-    """A simple timer/stopwatch helper class.
-
-    Inspired by: apache-commons-lang java stopwatch.
-
-    Not thread-safe.
-    """
-    _STARTED = 'STARTED'
-    _STOPPED = 'STOPPED'
-
-    def __init__(self, duration=None):
-        self._duration = duration
-        self._started_at = None
-        self._stopped_at = None
-        self._state = None
-
-    def start(self):
-        if self._state == self._STARTED:
-            return self
-        self._started_at = wallclock()
-        self._stopped_at = None
-        self._state = self._STARTED
-        return self
-
-    def elapsed(self):
-        if self._state == self._STOPPED:
-            return float(self._stopped_at - self._started_at)
-        elif self._state == self._STARTED:
-            return float(wallclock() - self._started_at)
-        else:
-            raise RuntimeError("Can not get the elapsed time of an invalid"
-                               " stopwatch")
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, type, value, traceback):
-        try:
-            self.stop()
-        except RuntimeError:
-            pass
-        # NOTE(harlowja): don't silence the exception.
-        return False
-
-    def leftover(self):
-        if self._duration is None:
-            raise RuntimeError("Can not get the leftover time of a watch that"
-                               " has no duration")
-        if self._state != self._STARTED:
-            raise RuntimeError("Can not get the leftover time of a stopwatch"
-                               " that has not been started")
-        end_time = self._started_at + self._duration
-        return max(0.0, end_time - wallclock())
-
-    def expired(self):
-        if self._duration is None:
-            return False
-        if self.elapsed() > self._duration:
-            return True
-        return False
-
-    def resume(self):
-        if self._state == self._STOPPED:
-            self._state = self._STARTED
-            return self
-        else:
-            raise RuntimeError("Can not resume a stopwatch that has not been"
-                               " stopped")
-
-    def stop(self):
-        if self._state == self._STOPPED:
-            return self
-        if self._state != self._STARTED:
-            raise RuntimeError("Can not stop a stopwatch that has not been"
-                               " started")
-        self._stopped_at = wallclock()
-        self._state = self._STOPPED
-        return self
-
-
 class Notifier(object):
-    """A utility helper class that can be used to subscribe to
-    notifications of events occurring as well as allow a entity to post said
-    notifications to subscribers.
+    """A notification helper class.
+
+    It is intended to be used to subscribe to notifications of events
+    occurring as well as allow a entity to post said notifications to any
+    associated subscribers without having either entity care about how this
+    notification occurs.
     """
 
     RESERVED_KEYS = ('details',)
@@ -665,12 +542,15 @@ def are_equal_exc_info_tuples(ei1, ei2):
 
 @contextlib.contextmanager
 def capture_failure():
-    """Save current exception, and yield back the failure (or raises a
-    runtime error if no active exception is being handled).
+    """Captures the occuring exception and provides a failure back.
 
-    In some cases the exception context can be cleared, resulting in None
-    being attempted to be saved after an exception handler is run. This
-    can happen when eventlet switches greenthreads or when running an
+    This will save the current exception information and yield back a
+    failure object for the caller to use (it will raise a runtime error if
+    no active exception is being handled).
+
+    This is useful since in some cases the exception context can be cleared,
+    resulting in None being attempted to be saved after an exception handler is
+    run. This can happen when eventlet switches greenthreads or when running an
     exception handler, code raises and catches an exception. In both
     cases the exception context will be cleared.
 
@@ -823,8 +703,23 @@ class Failure(object):
         return None
 
     def __str__(self):
-        return 'Failure: %s: %s' % (self._exc_type_names[0],
-                                    self._exception_str)
+        return self.pformat()
+
+    def pformat(self, traceback=False):
+        buf = six.StringIO()
+        buf.write(
+            'Failure: %s: %s' % (self._exc_type_names[0], self._exception_str))
+        if traceback:
+            if self._traceback_str is not None:
+                traceback_str = self._traceback_str.rstrip()
+            else:
+                traceback_str = None
+            if traceback_str:
+                buf.write('\nTraceback (most recent call last):\n')
+                buf.write(traceback_str)
+            else:
+                buf.write('\nTraceback not available.')
+        return buf.getvalue()
 
     def __iter__(self):
         """Iterate over exception type names."""

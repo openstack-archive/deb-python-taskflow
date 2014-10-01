@@ -14,22 +14,31 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import contextlib
 import threading
 
 from taskflow.engines.action_engine import compiler
 from taskflow.engines.action_engine import executor
 from taskflow.engines.action_engine import runtime
 from taskflow.engines import base
-
 from taskflow import exceptions as exc
 from taskflow.openstack.common import excutils
 from taskflow import retry
 from taskflow import states
 from taskflow import storage as atom_storage
-
 from taskflow.utils import lock_utils
 from taskflow.utils import misc
 from taskflow.utils import reflection
+
+
+@contextlib.contextmanager
+def _start_stop(executor):
+    # A teenie helper context manager to safely start/stop a executor...
+    executor.start()
+    try:
+        yield executor
+    finally:
+        executor.stop()
 
 
 class ActionEngine(base.EngineBase):
@@ -112,31 +121,38 @@ class ActionEngine(base.EngineBase):
         """
         self.compile()
         self.prepare()
-        self._task_executor.start()
-        state = None
         runner = self._runtime.runner
-        try:
+        last_state = None
+        with _start_stop(self._task_executor):
             self._change_state(states.RUNNING)
-            for state in runner.run_iter(timeout=timeout):
-                try:
-                    try_suspend = yield state
-                except GeneratorExit:
-                    break
-                else:
-                    if try_suspend:
+            try:
+                closed = False
+                for (last_state, failures) in runner.run_iter(timeout=timeout):
+                    if failures:
+                        misc.Failure.reraise_if_any(failures)
+                    if closed:
+                        continue
+                    try:
+                        try_suspend = yield last_state
+                    except GeneratorExit:
+                        # The generator was closed, attempt to suspend and
+                        # continue looping until we have cleanly closed up
+                        # shop...
+                        closed = True
                         self.suspend()
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                self._change_state(states.FAILURE)
-        else:
-            ignorable_states = getattr(runner, 'ignorable_states', [])
-            if state and state not in ignorable_states:
-                self._change_state(state)
-                if state != states.SUSPENDED and state != states.SUCCESS:
-                    failures = self.storage.get_failures()
-                    misc.Failure.reraise_if_any(failures.values())
-        finally:
-            self._task_executor.stop()
+                    else:
+                        if try_suspend:
+                            self.suspend()
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    self._change_state(states.FAILURE)
+            else:
+                ignorable_states = getattr(runner, 'ignorable_states', [])
+                if last_state and last_state not in ignorable_states:
+                    self._change_state(last_state)
+                    if last_state not in [states.SUSPENDED, states.SUCCESS]:
+                        failures = self.storage.get_failures()
+                        misc.Failure.reraise_if_any(failures.values())
 
     def _change_state(self, state):
         with self._state_lock:
@@ -144,20 +160,12 @@ class ActionEngine(base.EngineBase):
             if not states.check_flow_transition(old_state, state):
                 return
             self.storage.set_flow_state(state)
-        try:
-            flow_uuid = self._flow.uuid
-        except AttributeError:
-            # NOTE(harlowja): if the flow was just a single task, then it
-            # will not itself have a uuid, but the constructed flow_detail
-            # will.
-            if self._flow_detail is not None:
-                flow_uuid = self._flow_detail.uuid
-            else:
-                flow_uuid = None
-        details = dict(engine=self,
-                       flow_name=self._flow.name,
-                       flow_uuid=flow_uuid,
-                       old_state=old_state)
+        details = {
+            'engine': self,
+            'flow_name': self.storage.flow_name,
+            'flow_uuid': self.storage.flow_uuid,
+            'old_state': old_state,
+        }
         self.notifier.notify(state, details)
 
     def _ensure_storage(self):
@@ -226,9 +234,12 @@ class MultiThreadedActionEngine(ActionEngine):
     _storage_factory = atom_storage.MultiThreadedStorage
 
     def _task_executor_factory(self):
-        return executor.ParallelTaskExecutor(self._executor)
+        return executor.ParallelTaskExecutor(executor=self._executor,
+                                             max_workers=self._max_workers)
 
-    def __init__(self, flow, flow_detail, backend, conf, **kwargs):
+    def __init__(self, flow, flow_detail, backend, conf,
+                 executor=None, max_workers=None):
         super(MultiThreadedActionEngine, self).__init__(
             flow, flow_detail, backend, conf)
-        self._executor = kwargs.get('executor')
+        self._executor = executor
+        self._max_workers = max_workers

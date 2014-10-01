@@ -14,15 +14,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import functools
 import logging
-
-from kombu import exceptions as kombu_exc
 
 from taskflow.engines.action_engine import executor
 from taskflow.engines.worker_based import cache
 from taskflow.engines.worker_based import protocol as pr
 from taskflow.engines.worker_based import proxy
 from taskflow import exceptions as exc
+from taskflow.openstack.common import timeutils
+from taskflow.types import timing as tt
 from taskflow.utils import async_utils
 from taskflow.utils import misc
 from taskflow.utils import reflection
@@ -74,48 +75,42 @@ class WorkerTaskExecutor(executor.TaskExecutorBase):
         self._topics = topics
         self._requests_cache = cache.RequestsCache()
         self._workers_cache = cache.WorkersCache()
-        self._proxy = proxy.Proxy(uuid, exchange, self._on_message,
+        self._workers_arrival = threading.Condition()
+        handlers = {
+            pr.NOTIFY: [
+                self._process_notify,
+                functools.partial(pr.Notify.validate, response=True),
+            ],
+            pr.RESPONSE: [
+                self._process_response,
+                pr.Response.validate,
+            ],
+        }
+        self._proxy = proxy.Proxy(uuid, exchange, handlers,
                                   self._on_wait, **kwargs)
         self._proxy_thread = None
-        self._periodic = PeriodicWorker(misc.Timeout(pr.NOTIFY_PERIOD),
+        self._periodic = PeriodicWorker(tt.Timeout(pr.NOTIFY_PERIOD),
                                         [self._notify_topics])
         self._periodic_thread = None
 
-    def _on_message(self, data, message):
-        """This method is called on incoming message."""
-        LOG.debug("Got message: %s", data)
-        try:
-            # acknowledge message before processing
-            message.ack()
-        except kombu_exc.MessageStateError:
-            LOG.exception("Failed to acknowledge AMQP message.")
-        else:
-            LOG.debug("AMQP message acknowledged.")
-            try:
-                msg_type = message.properties['type']
-            except KeyError:
-                LOG.warning("The 'type' message property is missing.")
-            else:
-                if msg_type == pr.NOTIFY:
-                    self._process_notify(data)
-                elif msg_type == pr.RESPONSE:
-                    self._process_response(data, message)
-                else:
-                    LOG.warning("Unexpected message type: %s", msg_type)
-
-    def _process_notify(self, notify):
+    def _process_notify(self, notify, message):
         """Process notify message from remote side."""
         LOG.debug("Start processing notify message.")
         topic = notify['topic']
         tasks = notify['tasks']
 
         # add worker info to the cache
-        self._workers_cache.set(topic, tasks)
+        self._workers_arrival.acquire()
+        try:
+            self._workers_cache[topic] = tasks
+            self._workers_arrival.notify_all()
+        finally:
+            self._workers_arrival.release()
 
         # publish waiting requests
         for request in self._requests_cache.get_waiting_requests(tasks):
-            request.set_pending()
-            self._publish_request(request, topic)
+            if request.transition_and_log_error(pr.PENDING, logger=LOG):
+                self._publish_request(request, topic)
 
     def _process_response(self, response, message):
         """Process response from remote side."""
@@ -125,20 +120,23 @@ class WorkerTaskExecutor(executor.TaskExecutorBase):
         except KeyError:
             LOG.warning("The 'correlation_id' message property is missing.")
         else:
-            LOG.debug("Task uuid: '%s'", task_uuid)
             request = self._requests_cache.get(task_uuid)
             if request is not None:
                 response = pr.Response.from_dict(response)
                 if response.state == pr.RUNNING:
-                    request.set_running()
+                    request.transition_and_log_error(pr.RUNNING, logger=LOG)
                 elif response.state == pr.PROGRESS:
                     request.on_progress(**response.data)
                 elif response.state in (pr.FAILURE, pr.SUCCESS):
-                    # NOTE(imelnikov): request should not be in cache when
-                    # another thread can see its result and schedule another
-                    # request with same uuid; so we remove it, then set result
-                    self._requests_cache.delete(request.uuid)
-                    request.set_result(**response.data)
+                    moved = request.transition_and_log_error(response.state,
+                                                             logger=LOG)
+                    if moved:
+                        # NOTE(imelnikov): request should not be in the
+                        # cache when another thread can see its result and
+                        # schedule another request with the same uuid; so
+                        # we remove it, then set the result...
+                        del self._requests_cache[request.uuid]
+                        request.set_result(**response.data)
                 else:
                     LOG.warning("Unexpected response status: '%s'",
                                 response.state)
@@ -152,10 +150,21 @@ class WorkerTaskExecutor(executor.TaskExecutorBase):
         When request has expired it is removed from the requests cache and
         the `RequestTimeout` exception is set as a request result.
         """
-        LOG.debug("Request '%r' has expired.", request)
-        LOG.debug("The '%r' request has expired.", request)
-        request.set_result(misc.Failure.from_exception(
-            exc.RequestTimeout("The '%r' request has expired" % request)))
+        if request.transition_and_log_error(pr.FAILURE, logger=LOG):
+            # Raise an exception (and then catch it) so we get a nice
+            # traceback that the request will get instead of it getting
+            # just an exception with no traceback...
+            try:
+                request_age = timeutils.delta_seconds(request.created_on,
+                                                      timeutils.utcnow())
+                raise exc.RequestTimeout(
+                    "Request '%s' has expired after waiting for %0.2f"
+                    " seconds for it to transition out of (%s) states"
+                    % (request, request_age, ", ".join(pr.WAITING_STATES)))
+            except exc.RequestTimeout:
+                with misc.capture_failure() as fail:
+                    LOG.debug(fail.exception_str)
+                    request.set_result(fail)
 
     def _on_wait(self):
         """This function is called cyclically between draining events."""
@@ -174,11 +183,11 @@ class WorkerTaskExecutor(executor.TaskExecutorBase):
             # before putting it into the requests cache to prevent the notify
             # processing thread get list of waiting requests and publish it
             # before it is published here, so it wouldn't be published twice.
-            request.set_pending()
-            self._requests_cache.set(request.uuid, request)
-            self._publish_request(request, topic)
+            if request.transition_and_log_error(pr.PENDING, logger=LOG):
+                self._requests_cache[request.uuid] = request
+                self._publish_request(request, topic)
         else:
-            self._requests_cache.set(request.uuid, request)
+            self._requests_cache[request.uuid] = request
 
         return request.result
 
@@ -191,10 +200,10 @@ class WorkerTaskExecutor(executor.TaskExecutorBase):
                                 correlation_id=request.uuid)
         except Exception:
             with misc.capture_failure() as failure:
-                LOG.exception("Failed to submit the '%s' request." %
-                              request)
-                self._requests_cache.delete(request.uuid)
-                request.set_result(failure)
+                LOG.exception("Failed to submit the '%s' request.", request)
+                if request.transition_and_log_error(pr.FAILURE, logger=LOG):
+                    del self._requests_cache[request.uuid]
+                    request.set_result(failure)
 
     def _notify_topics(self):
         """Cyclically called to publish notify message to each topic."""
@@ -215,8 +224,35 @@ class WorkerTaskExecutor(executor.TaskExecutorBase):
         """Wait for futures returned by this executor to complete."""
         return async_utils.wait_for_any(fs, timeout)
 
+    def wait_for_workers(self, workers=1, timeout=None):
+        """Waits for geq workers to notify they are ready to do work.
+
+        NOTE(harlowja): if a timeout is provided this function will wait
+        until that timeout expires, if the amount of workers does not reach
+        the desired amount of workers before the timeout expires then this will
+        return how many workers are still needed, otherwise it will
+        return zero.
+        """
+        if workers <= 0:
+            raise ValueError("Worker amount must be greater than zero")
+        w = None
+        if timeout is not None:
+            w = tt.StopWatch(timeout).start()
+        self._workers_arrival.acquire()
+        try:
+            while len(self._workers_cache) < workers:
+                if w is not None and w.expired():
+                    return workers - len(self._workers_cache)
+                timeout = None
+                if w is not None:
+                    timeout = w.leftover()
+                self._workers_arrival.wait(timeout)
+            return 0
+        finally:
+            self._workers_arrival.release()
+
     def start(self):
-        """Start proxy thread (and associated topic notification thread)."""
+        """Starts proxy thread and associated topic notification thread."""
         if not _is_alive(self._proxy_thread):
             self._proxy_thread = tu.daemon_thread(self._proxy.start)
             self._proxy_thread.start()
@@ -227,9 +263,7 @@ class WorkerTaskExecutor(executor.TaskExecutorBase):
             self._periodic_thread.start()
 
     def stop(self):
-        """Stop proxy thread (and associated topic notification thread), so
-        those threads will be gracefully terminated.
-        """
+        """Stops proxy thread and associated topic notification thread."""
         if self._periodic_thread is not None:
             self._periodic.stop()
             self._periodic_thread.join()

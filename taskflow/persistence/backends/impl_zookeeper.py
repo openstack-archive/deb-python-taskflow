@@ -34,9 +34,16 @@ MIN_ZK_VERSION = (3, 4, 0)
 
 
 class ZkBackend(base.Backend):
-    """ZooKeeper as backend storage implementation
+    """A zookeeper backend.
 
-    Example conf (use Kazoo):
+    This backend writes logbooks, flow details, and atom details to a provided
+    base path in zookeeper. It will create and store those objects in three
+    key directories (one for logbooks, one for flow details and one for atom
+    details). It creates those associated directories and then creates files
+    inside those directories that represent the contents of those objects for
+    later reading and writing.
+
+    Example conf:
 
     conf = {
         "hosts": "192.168.0.1:2181,192.168.0.2:2181,192.168.0.3:2181",
@@ -126,8 +133,11 @@ class ZkConnection(base.Connection):
 
     @contextlib.contextmanager
     def _exc_wrapper(self):
-        """Exception wrapper which wraps kazoo exceptions and groups them
-        to taskflow exceptions.
+        """Exception context-manager which wraps kazoo exceptions.
+
+        This is used to capture and wrap any kazoo specific exceptions and
+        then group them into corresponding taskflow exceptions (not doing
+        that would expose the underlying kazoo exception model).
         """
         try:
             yield
@@ -146,8 +156,10 @@ class ZkConnection(base.Connection):
     def update_atom_details(self, ad):
         """Update a atom detail transactionally."""
         with self._exc_wrapper():
-            with self._client.transaction() as txn:
-                return self._update_atom_details(ad, txn)
+            txn = self._client.transaction()
+            ad = self._update_atom_details(ad, txn)
+            k_utils.checked_commit(txn)
+            return ad
 
     def _update_atom_details(self, ad, txn, create_missing=False):
         # Determine whether the desired data exists or not.
@@ -199,8 +211,10 @@ class ZkConnection(base.Connection):
     def update_flow_details(self, fd):
         """Update a flow detail transactionally."""
         with self._exc_wrapper():
-            with self._client.transaction() as txn:
-                return self._update_flow_details(fd, txn)
+            txn = self._client.transaction()
+            fd = self._update_flow_details(fd, txn)
+            k_utils.checked_commit(txn)
+            return fd
 
     def _update_flow_details(self, fd, txn, create_missing=False):
         # Determine whether the desired data exists or not
@@ -296,19 +310,19 @@ class ZkConnection(base.Connection):
             return e_lb
 
         with self._exc_wrapper():
-            with self._client.transaction() as txn:
-                # Determine whether the desired data exists or not.
-                lb_path = paths.join(self.book_path, lb.uuid)
-                try:
-                    lb_data, _zstat = self._client.get(lb_path)
-                except k_exc.NoNodeError:
-                    # Create a new logbook since it doesn't exist.
-                    e_lb = _create_logbook(lb_path, txn)
-                else:
-                    # Otherwise update the existing logbook instead.
-                    e_lb = _update_logbook(lb_path, lb_data, txn)
-                # Finally return (updated) logbook.
-                return e_lb
+            txn = self._client.transaction()
+            # Determine whether the desired data exists or not.
+            lb_path = paths.join(self.book_path, lb.uuid)
+            try:
+                lb_data, _zstat = self._client.get(lb_path)
+            except k_exc.NoNodeError:
+                # Create a new logbook since it doesn't exist.
+                e_lb = _create_logbook(lb_path, txn)
+            else:
+                # Otherwise update the existing logbook instead.
+                e_lb = _update_logbook(lb_path, lb_data, txn)
+            k_utils.checked_commit(txn)
+            return e_lb
 
     def _get_logbook(self, lb_uuid):
         lb_path = paths.join(self.book_path, lb_uuid)
@@ -370,35 +384,38 @@ class ZkConnection(base.Connection):
             txn.delete(lb_path)
 
         with self._exc_wrapper():
-            with self._client.transaction() as txn:
-                _destroy_logbook(lb_uuid, txn)
+            txn = self._client.transaction()
+            _destroy_logbook(lb_uuid, txn)
+            k_utils.checked_commit(txn)
 
     def clear_all(self, delete_dirs=True):
         """Delete all data transactionally."""
         with self._exc_wrapper():
-            with self._client.transaction() as txn:
+            txn = self._client.transaction()
 
-                # Delete all data under logbook path.
-                for lb_uuid in self._client.get_children(self.book_path):
-                    lb_path = paths.join(self.book_path, lb_uuid)
-                    for fd_uuid in self._client.get_children(lb_path):
-                        txn.delete(paths.join(lb_path, fd_uuid))
-                    txn.delete(lb_path)
+            # Delete all data under logbook path.
+            for lb_uuid in self._client.get_children(self.book_path):
+                lb_path = paths.join(self.book_path, lb_uuid)
+                for fd_uuid in self._client.get_children(lb_path):
+                    txn.delete(paths.join(lb_path, fd_uuid))
+                txn.delete(lb_path)
 
-                # Delete all data under flow detail path.
-                for fd_uuid in self._client.get_children(self.flow_path):
-                    fd_path = paths.join(self.flow_path, fd_uuid)
-                    for ad_uuid in self._client.get_children(fd_path):
-                        txn.delete(paths.join(fd_path, ad_uuid))
-                    txn.delete(fd_path)
+            # Delete all data under flow detail path.
+            for fd_uuid in self._client.get_children(self.flow_path):
+                fd_path = paths.join(self.flow_path, fd_uuid)
+                for ad_uuid in self._client.get_children(fd_path):
+                    txn.delete(paths.join(fd_path, ad_uuid))
+                txn.delete(fd_path)
 
-                # Delete all data under atom detail path.
-                for ad_uuid in self._client.get_children(self.atom_path):
-                    ad_path = paths.join(self.atom_path, ad_uuid)
-                    txn.delete(ad_path)
+            # Delete all data under atom detail path.
+            for ad_uuid in self._client.get_children(self.atom_path):
+                ad_path = paths.join(self.atom_path, ad_uuid)
+                txn.delete(ad_path)
 
-                # Delete containing directories.
-                if delete_dirs:
-                    txn.delete(self.book_path)
-                    txn.delete(self.atom_path)
-                    txn.delete(self.flow_path)
+            # Delete containing directories.
+            if delete_dirs:
+                txn.delete(self.book_path)
+                txn.delete(self.atom_path)
+                txn.delete(self.flow_path)
+
+            k_utils.checked_commit(txn)

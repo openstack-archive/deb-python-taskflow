@@ -15,22 +15,59 @@
 #    under the License.
 
 import abc
-
-import six
+import logging
+import threading
 
 from concurrent import futures
+import jsonschema
+from jsonschema import exceptions as schema_exc
+import six
 
 from taskflow.engines.action_engine import executor
+from taskflow import exceptions as excp
+from taskflow.openstack.common import timeutils
+from taskflow.types import timing as tt
+from taskflow.utils import lock_utils
 from taskflow.utils import misc
 from taskflow.utils import reflection
 
-# NOTE(skudriashev): This is protocol events, not related to the task states.
+# NOTE(skudriashev): This is protocol states and events, which are not
+# related to task states.
 WAITING = 'WAITING'
 PENDING = 'PENDING'
 RUNNING = 'RUNNING'
 SUCCESS = 'SUCCESS'
 FAILURE = 'FAILURE'
 PROGRESS = 'PROGRESS'
+
+# During these states the expiry is active (once out of these states the expiry
+# no longer matters, since we have no way of knowing how long a task will run
+# for).
+WAITING_STATES = (WAITING, PENDING)
+
+_ALL_STATES = (WAITING, PENDING, RUNNING, SUCCESS, FAILURE, PROGRESS)
+_STOP_TIMER_STATES = (RUNNING, SUCCESS, FAILURE)
+
+# Transitions that a request state can go through.
+_ALLOWED_TRANSITIONS = (
+    # Used when a executor starts to publish a request to a selected worker.
+    (WAITING, PENDING),
+    # When a request expires (isn't able to be processed by any worker).
+    (WAITING, FAILURE),
+    # Worker has started executing a request.
+    (PENDING, RUNNING),
+    # Worker failed to construct/process a request to run (either the worker
+    # did not transition to RUNNING in the given timeout or the worker itself
+    # had some type of failure before RUNNING started).
+    #
+    # Also used by the executor if the request was attempted to be published
+    # but that did publishing process did not work out.
+    (PENDING, FAILURE),
+    # Execution failed due to some type of remote failure.
+    (RUNNING, FAILURE),
+    # Execution succeeded & has completed.
+    (RUNNING, SUCCESS),
+)
 
 # Remote task actions.
 EXECUTE = 'execute'
@@ -61,6 +98,14 @@ NOTIFY = 'NOTIFY'
 REQUEST = 'REQUEST'
 RESPONSE = 'RESPONSE'
 
+# Special jsonschema validation types/adjustments.
+_SCHEMA_TYPES = {
+    # See: https://github.com/Julian/jsonschema/issues/148
+    'array': (list, tuple),
+}
+
+LOG = logging.getLogger(__name__)
+
 
 @six.add_metaclass(abc.ABCMeta)
 class Message(object):
@@ -78,18 +123,101 @@ class Notify(Message):
     """Represents notify message type."""
     TYPE = NOTIFY
 
+    # NOTE(harlowja): the executor (the entity who initially requests a worker
+    # to send back a notification response) schema is different than the
+    # worker response schema (that's why there are two schemas here).
+    _RESPONSE_SCHEMA = {
+        "type": "object",
+        'properties': {
+            'topic': {
+                "type": "string",
+            },
+            'tasks': {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                },
+            }
+        },
+        "required": ["topic", 'tasks'],
+        "additionalProperties": False,
+    }
+    _SENDER_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+    }
+
     def __init__(self, **data):
         self._data = data
 
     def to_dict(self):
         return self._data
 
+    @classmethod
+    def validate(cls, data, response):
+        if response:
+            schema = cls._RESPONSE_SCHEMA
+        else:
+            schema = cls._SENDER_SCHEMA
+        try:
+            jsonschema.validate(data, schema, types=_SCHEMA_TYPES)
+        except schema_exc.ValidationError as e:
+            if response:
+                raise excp.InvalidFormat("%s message response data not of the"
+                                         " expected format: %s"
+                                         % (cls.TYPE, e.message), e)
+            else:
+                raise excp.InvalidFormat("%s message sender data not of the"
+                                         " expected format: %s"
+                                         % (cls.TYPE, e.message), e)
+
 
 class Request(Message):
-    """Represents request with execution results. Every request is created in
-    the WAITING state and is expired within the given timeout.
+    """Represents request with execution results.
+
+    Every request is created in the WAITING state and is expired within the
+    given timeout if it does not transition out of the (WAITING, PENDING)
+    states.
     """
+
     TYPE = REQUEST
+    _SCHEMA = {
+        "type": "object",
+        'properties': {
+            # These two are typically only sent on revert actions (that is
+            # why are are not including them in the required section).
+            'result': {},
+            'failures': {
+                "type": "object",
+            },
+            'task_cls': {
+                'type': 'string',
+            },
+            'task_name': {
+                'type': 'string',
+            },
+            'task_version': {
+                "oneOf": [
+                    {
+                        "type": "string",
+                    },
+                    {
+                        "type": "array",
+                    },
+                ],
+            },
+            'action': {
+                "type": "string",
+                "enum": list(six.iterkeys(ACTION_TO_EVENT)),
+            },
+            # Keyword arguments that end up in the revert() or execute()
+            # method of the remote task.
+            'arguments': {
+                "type": "object",
+            },
+        },
+        'required': ['task_cls', 'task_name', 'task_version', 'action'],
+    }
 
     def __init__(self, task, uuid, action, arguments, progress_callback,
                  timeout, **kwargs):
@@ -101,12 +229,11 @@ class Request(Message):
         self._arguments = arguments
         self._progress_callback = progress_callback
         self._kwargs = kwargs
-        self._watch = misc.StopWatch(duration=timeout).start()
+        self._watch = tt.StopWatch(duration=timeout).start()
         self._state = WAITING
+        self._lock = threading.Lock()
+        self._created_on = timeutils.utcnow()
         self.result = futures.Future()
-
-    def __repr__(self):
-        return "%s:%s" % (self._task_cls, self._action)
 
     @property
     def uuid(self):
@@ -121,6 +248,10 @@ class Request(Message):
         return self._state
 
     @property
+    def created_on(self):
+        return self._created_on
+
+    @property
     def expired(self):
         """Check if request has expired.
 
@@ -131,13 +262,16 @@ class Request(Message):
         state for more then the given timeout (it is not considered to be
         expired in any other state).
         """
-        if self._state in (WAITING, PENDING):
+        if self._state in WAITING_STATES:
             return self._watch.expired()
         return False
 
     def to_dict(self):
-        """Return json-serializable request, converting all `misc.Failure`
-        objects into dictionaries.
+        """Return json-serializable request.
+
+        To convert requests that have failed due to some exception this will
+        convert all `misc.Failure` objects into dictionaries (which will then
+        be reconstituted by the receiver).
         """
         request = dict(task_cls=self._task_cls, task_name=self._task.name,
                        task_version=self._task.version, action=self._action,
@@ -158,20 +292,121 @@ class Request(Message):
     def set_result(self, result):
         self.result.set_result((self._task, self._event, result))
 
-    def set_pending(self):
-        self._state = PENDING
-
-    def set_running(self):
-        self._state = RUNNING
-        self._watch.stop()
-
     def on_progress(self, event_data, progress):
         self._progress_callback(self._task, event_data, progress)
+
+    def transition_and_log_error(self, new_state, logger=None):
+        """Transitions *and* logs an error if that transitioning raises.
+
+        This overlays the transition function and performs nearly the same
+        functionality but instead of raising if the transition was not valid
+        it logs a warning to the provided logger and returns False to
+        indicate that the transition was not performed (note that this
+        is *different* from the transition function where False means
+        ignored).
+        """
+        if logger is None:
+            logger = LOG
+        moved = False
+        try:
+            moved = self.transition(new_state)
+        except excp.InvalidState:
+            logger.warn("Failed to transition '%s' to %s state.", self,
+                        new_state, exc_info=True)
+        return moved
+
+    @lock_utils.locked
+    def transition(self, new_state):
+        """Transitions the request to a new state.
+
+        If transition was performed, it returns True. If transition
+        should was ignored, it returns False. If transition was not
+        valid (and will not be performed), it raises an InvalidState
+        exception.
+        """
+        old_state = self._state
+        if old_state == new_state:
+            return False
+        pair = (old_state, new_state)
+        if pair not in _ALLOWED_TRANSITIONS:
+            raise excp.InvalidState("Request transition from %s to %s is"
+                                    " not allowed" % pair)
+        if new_state in _STOP_TIMER_STATES:
+            self._watch.stop()
+        self._state = new_state
+        LOG.debug("Transitioned '%s' from %s state to %s state", self,
+                  old_state, new_state)
+        return True
+
+    @classmethod
+    def validate(cls, data):
+        try:
+            jsonschema.validate(data, cls._SCHEMA, types=_SCHEMA_TYPES)
+        except schema_exc.ValidationError as e:
+            raise excp.InvalidFormat("%s message response data not of the"
+                                     " expected format: %s"
+                                     % (cls.TYPE, e.message), e)
 
 
 class Response(Message):
     """Represents response message type."""
     TYPE = RESPONSE
+    _SCHEMA = {
+        "type": "object",
+        'properties': {
+            'state': {
+                "type": "string",
+                "enum": list(_ALL_STATES),
+            },
+            'data': {
+                "anyOf": [
+                    {
+                        "$ref": "#/definitions/progress",
+                    },
+                    {
+                        "$ref": "#/definitions/completion",
+                    },
+                    {
+                        "$ref": "#/definitions/empty",
+                    },
+                ],
+            },
+        },
+        "required": ["state", 'data'],
+        "additionalProperties": False,
+        "definitions": {
+            "progress": {
+                "type": "object",
+                "properties": {
+                    'progress': {
+                        'type': 'number',
+                    },
+                    'event_data': {
+                        'type': 'object',
+                    },
+                },
+                "required": ["progress", 'event_data'],
+                "additionalProperties": False,
+            },
+            # Used when sending *only* request state changes (and no data is
+            # expected).
+            "empty": {
+                "type": "object",
+                "additionalProperties": False,
+            },
+            "completion": {
+                "type": "object",
+                "properties": {
+                    # This can be any arbitrary type that a task returns, so
+                    # thats why we can't be strict about what type it is since
+                    # any of the json serializable types are allowed.
+                    "result": {},
+                },
+                "required": ["result"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
     def __init__(self, state, **data):
         self._state = state
@@ -195,3 +430,12 @@ class Response(Message):
 
     def to_dict(self):
         return dict(state=self._state, data=self._data)
+
+    @classmethod
+    def validate(cls, data):
+        try:
+            jsonschema.validate(data, cls._SCHEMA, types=_SCHEMA_TYPES)
+        except schema_exc.ValidationError as e:
+            raise excp.InvalidFormat("%s message response data not of the"
+                                     " expected format: %s"
+                                     % (cls.TYPE, e.message), e)

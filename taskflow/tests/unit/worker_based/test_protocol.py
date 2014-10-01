@@ -14,14 +14,76 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from concurrent import futures
 import mock
 
-from concurrent import futures
-
 from taskflow.engines.worker_based import protocol as pr
+from taskflow import exceptions as excp
+from taskflow.openstack.common import uuidutils
 from taskflow import test
 from taskflow.tests import utils
 from taskflow.utils import misc
+
+
+class TestProtocolValidation(test.TestCase):
+    def test_send_notify(self):
+        msg = pr.Notify()
+        pr.Notify.validate(msg.to_dict(), False)
+
+    def test_send_notify_invalid(self):
+        msg = {
+            'all your base': 'are belong to us',
+        }
+        self.assertRaises(excp.InvalidFormat,
+                          pr.Notify.validate, msg, False)
+
+    def test_reply_notify(self):
+        msg = pr.Notify(topic="bob", tasks=['a', 'b', 'c'])
+        pr.Notify.validate(msg.to_dict(), True)
+
+    def test_reply_notify_invalid(self):
+        msg = {
+            'topic': {},
+            'tasks': 'not yours',
+        }
+        self.assertRaises(excp.InvalidFormat,
+                          pr.Notify.validate, msg, True)
+
+    def test_request(self):
+        msg = pr.Request(utils.DummyTask("hi"), uuidutils.generate_uuid(),
+                         pr.EXECUTE, {}, None, 1.0)
+        pr.Request.validate(msg.to_dict())
+
+    def test_request_invalid(self):
+        msg = {
+            'task_name': 1,
+            'task_cls': False,
+            'arguments': [],
+        }
+        self.assertRaises(excp.InvalidFormat, pr.Request.validate, msg)
+
+    def test_request_invalid_action(self):
+        msg = pr.Request(utils.DummyTask("hi"), uuidutils.generate_uuid(),
+                         pr.EXECUTE, {}, None, 1.0)
+        msg = msg.to_dict()
+        msg['action'] = 'NOTHING'
+        self.assertRaises(excp.InvalidFormat, pr.Request.validate, msg)
+
+    def test_response_progress(self):
+        msg = pr.Response(pr.PROGRESS, progress=0.5, event_data={})
+        pr.Response.validate(msg.to_dict())
+
+    def test_response_completion(self):
+        msg = pr.Response(pr.SUCCESS, result=1)
+        pr.Response.validate(msg.to_dict())
+
+    def test_response_mixed_invalid(self):
+        msg = pr.Response(pr.PROGRESS, progress=0.5, event_data={}, result=1)
+        self.assertRaises(excp.InvalidFormat, pr.Response.validate, msg)
+
+    def test_response_bad_state(self):
+        msg = pr.Response('STUFF')
+        self.assertRaises(excp.InvalidFormat, pr.Response.validate, msg)
 
 
 class TestProtocol(test.TestCase):
@@ -53,21 +115,24 @@ class TestProtocol(test.TestCase):
         to_dict.update(kwargs)
         return to_dict
 
+    def test_request_transitions(self):
+        request = self.request()
+        self.assertEqual(pr.WAITING, request.state)
+        self.assertIn(request.state, pr.WAITING_STATES)
+        self.assertRaises(excp.InvalidState, request.transition, pr.SUCCESS)
+        self.assertFalse(request.transition(pr.WAITING))
+        self.assertTrue(request.transition(pr.PENDING))
+        self.assertTrue(request.transition(pr.RUNNING))
+        self.assertTrue(request.transition(pr.SUCCESS))
+        for s in (pr.PENDING, pr.WAITING):
+            self.assertRaises(excp.InvalidState, request.transition, s)
+
     def test_creation(self):
         request = self.request()
         self.assertEqual(request.uuid, self.task_uuid)
         self.assertEqual(request.task_cls, self.task.name)
         self.assertIsInstance(request.result, futures.Future)
         self.assertFalse(request.result.done())
-
-    def test_str(self):
-        request = self.request()
-        self.assertEqual(str(request),
-                         "<REQUEST> %s" % self.request_to_dict())
-
-    def test_repr(self):
-        expected = '%s:%s' % (self.task.name, self.task_action)
-        self.assertEqual(repr(self.request()), expected)
 
     def test_to_dict_default(self):
         self.assertEqual(self.request().to_dict(), self.request_to_dict())
@@ -94,19 +159,20 @@ class TestProtocol(test.TestCase):
 
     @mock.patch('taskflow.engines.worker_based.protocol.misc.wallclock')
     def test_pending_not_expired(self, mocked_wallclock):
-        mocked_wallclock.side_effect = [1, self.timeout]
+        mocked_wallclock.side_effect = [0, self.timeout - 1]
         self.assertFalse(self.request().expired)
 
     @mock.patch('taskflow.engines.worker_based.protocol.misc.wallclock')
     def test_pending_expired(self, mocked_wallclock):
-        mocked_wallclock.side_effect = [1, self.timeout + 2]
+        mocked_wallclock.side_effect = [0, self.timeout + 2]
         self.assertTrue(self.request().expired)
 
     @mock.patch('taskflow.engines.worker_based.protocol.misc.wallclock')
     def test_running_not_expired(self, mocked_wallclock):
-        mocked_wallclock.side_effect = [1, self.timeout + 2]
+        mocked_wallclock.side_effect = [0, self.timeout + 2]
         request = self.request()
-        request.set_running()
+        request.transition(pr.PENDING)
+        request.transition(pr.RUNNING)
         self.assertFalse(request.expired)
 
     def test_set_result(self):
