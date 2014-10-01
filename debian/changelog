@@ -1,6 +1,9 @@
 python-taskflow (0.4.0-1) experimental; urgency=medium
 
   * New upstream release.
+  * Updated (build-)depends for this release.
+  * Do not support python 2.6 because of the need for ordereddict. Therefore
+    setting-up X-Python-Version: >= 2.7.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 01 Oct 2014 16:31:11 +0800
 
