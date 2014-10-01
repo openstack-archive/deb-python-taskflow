@@ -23,7 +23,6 @@ Usual usage in an openstack.common module:
 """
 
 import copy
-import functools
 import gettext
 import locale
 from logging import handlers
@@ -149,15 +148,7 @@ def enable_lazy():
     your project is importing _ directly instead of using the
     gettextutils.install() way of importing the _ function.
     """
-    # FIXME(dhellmann): This function will be removed in oslo.i18n,
-    # because the TranslatorFactory makes it superfluous.
-    global _, _LI, _LW, _LE, _LC, USE_LAZY
-    tf = TranslatorFactory('taskflow', lazy=True)
-    _ = tf.primary
-    _LI = tf.log_info
-    _LW = tf.log_warning
-    _LE = tf.log_error
-    _LC = tf.log_critical
+    global USE_LAZY
     USE_LAZY = True
 
 

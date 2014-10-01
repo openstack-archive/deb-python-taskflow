@@ -37,11 +37,6 @@ _DONE_STATES = frozenset([
     futures._base.FINISHED,
 ])
 
-_DONE_STATES = frozenset([
-    futures._base.CANCELLED_AND_NOTIFIED,
-    futures._base.FINISHED,
-])
-
 
 class _WorkItem(object):
     def __init__(self, future, fn, args, kwargs):

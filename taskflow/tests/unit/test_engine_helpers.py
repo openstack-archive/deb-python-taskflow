@@ -38,20 +38,6 @@ class EngineLoadingTestCase(test.TestCase):
                           engine_conf='not_really_any_engine')
 
 
-class EngineLoadingTestCase(test.TestCase):
-    def test_default_load(self):
-        f = linear_flow.Flow('test')
-        f.add(test_utils.TaskOneReturn("run-1"))
-        e = taskflow.engines.load(f)
-        self.assertIsNotNone(e)
-
-    def test_unknown_load(self):
-        f = linear_flow.Flow('test')
-        f.add(test_utils.TaskOneReturn("run-1"))
-        self.assertRaises(exc.NotFound, taskflow.engines.load, f,
-                          engine_conf='not_really_any_engine')
-
-
 class FlowFromDetailTestCase(test.TestCase):
     def test_no_meta(self):
         _lb, flow_detail = p_utils.temporary_flow_detail()

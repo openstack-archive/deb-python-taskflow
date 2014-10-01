@@ -225,13 +225,6 @@ def millis_to_datetime(milliseconds):
     return datetime.datetime.fromtimestamp(float(milliseconds) / 1000)
 
 
-def millis_to_datetime(milliseconds):
-    """Converts a given number of milliseconds from the epoch into a datetime
-    object.
-    """
-    return datetime.datetime.fromtimestamp(float(milliseconds) / 1000)
-
-
 def get_version_string(obj):
     """Gets a object's version as a string.
 

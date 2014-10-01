@@ -16,6 +16,7 @@
 
 import functools
 import logging
+import threading
 
 from taskflow.engines.action_engine import executor
 from taskflow.engines.worker_based import cache
