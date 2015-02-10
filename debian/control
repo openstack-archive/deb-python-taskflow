@@ -2,44 +2,42 @@ Source: python-taskflow
 Section: python
 Priority: optional
 Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
-Uploaders: Julien Danjou <acid@debian.org>,
-           Thomas Goirand <zigo@debian.org>,
-           Mehdi Abaakouk <sileht@sileht.net>,
-           Sebastien Badia <seb@sebian.fr>
+Uploaders: Thomas Goirand <zigo@debian.org>
 Build-Depends: debhelper (>= 9),
+               dh-python,
                openstack-pkg-tools,
                python-all (>= 2.6.6-3~),
                python-pbr (>= 0.6),
                python-setuptools,
                python-sphinx
-Build-depends-indep: alembic (>= 0.4.1),
+Build-depends-indep: alembic (>= 0.7.2),
                      pylint (>= 0.25),
-                     python-anyjson (>= 0.3.3),
-                     python-babel (>= 1.3),
                      python-concurrent.futures (>= 2.1.6),
                      python-coverage (>= 3.6),
                      python-eventlet (>= 0.13.0),
                      python-hacking (>= 0.8.0),
-                     python-iso8601 (>= 0.1.9),
                      python-jsonschema (>= 2.0.0),
                      python-kazoo (>= 1.3.1),
                      python-kombu (>= 2.4.8),
+                     python-kombu (>= 2.5.0),
                      python-mock (>= 1.0),
                      python-mysqldb,
                      python-networkx (>= 1.8),
-                     python-oslosphinx (>= 2.2.0),
-                     python-prettytable (>= 0.7),
+                     python-oslo.serialization (>= 1.2.0),
+                     python-oslo.utils (>= 1.2.0),
+                     python-oslosphinx (>= 2.2.0.0),
+                     python-oslotest (>= 1.2.0),
                      python-psycopg2,
                      python-six (>= 1.7.0),
                      python-sqlalchemy (>= 0.7.8),
-                     python-stevedore (>= 0.14),
+                     python-stevedore (>= 1.1.0),
                      python-subunit (>= 0.0.18),
-                     python-testtools (>= 0.9.34),
+                     python-testtools (>= 0.9.36),
                      python-unittest2,
                      python-zake (>= 0.1),
                      subunit (>= 0.0.18),
                      testrepository (>= 0.0.18)
-Standards-Version: 3.9.5
+Standards-Version: 3.9.6
 X-Python-Version: >= 2.7
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-taskflow.git
 Vcs-Git: git://anonscm.debian.org/openstack/python-taskflow.git
@@ -48,22 +46,21 @@ Homepage: https://github.com/openstack/taskflow
 Package: python-taskflow
 Architecture: all
 Pre-Depends: dpkg (>= 1.15.6~)
-Depends: alembic (>= 0.4.1),
-         python-anyjson (>= 0.3.3),
-         python-babel (>= 1.3),
+Depends: alembic (>= 0.7.2),
          python-concurrent.futures (>= 2.1.6),
          python-eventlet (>= 0.13.0),
-         python-iso8601 (>= 0.1.9),
          python-jsonschema (>= 2.0.0),
          python-kazoo (>= 1.3.1),
          python-kombu (>= 2.4.8),
          python-mysqldb,
          python-networkx (>= 1.8),
-         python-prettytable (>= 0.7),
+         python-oslo.serialization (>= 1.2.0),
+         python-oslo.utils (>= 1.2.0),
+         python-pbr,
          python-psycopg2,
          python-six (>= 1.7.0),
          python-sqlalchemy (>= 0.7.8),
-         python-stevedore (>= 0.14),
+         python-stevedore (>= 1.1.0),
          ${misc:Depends},
          ${python:Depends}
 Recommends: ${python:Recommends}
