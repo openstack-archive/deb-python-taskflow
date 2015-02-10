@@ -17,16 +17,16 @@
 import contextlib
 import threading
 
-import mock
+from oslo_utils import uuidutils
 
 from taskflow import exceptions
-from taskflow.openstack.common import uuidutils
 from taskflow.persistence import backends
 from taskflow.persistence import logbook
 from taskflow import states
 from taskflow import storage
 from taskflow import test
-from taskflow.utils import misc
+from taskflow.tests import utils as test_utils
+from taskflow.types import failure
 from taskflow.utils import persistence_utils as p_utils
 
 
@@ -60,7 +60,7 @@ class StorageTestMixin(object):
     def test_non_saving_storage(self):
         _lb, flow_detail = p_utils.temporary_flow_detail(self.backend)
         s = storage.SingleThreadedStorage(flow_detail=flow_detail)
-        s.ensure_task('my_task')
+        s.ensure_atom(test_utils.NoopTask('my_task'))
         self.assertTrue(uuidutils.is_uuid_like(s.get_atom_uuid('my_task')))
 
     def test_flow_name_and_uuid(self):
@@ -71,14 +71,14 @@ class StorageTestMixin(object):
 
     def test_ensure_task(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         self.assertEqual(s.get_atom_state('my task'), states.PENDING)
         self.assertTrue(uuidutils.is_uuid_like(s.get_atom_uuid('my task')))
 
     def test_get_tasks_states(self):
         s = self._get_storage()
-        s.ensure_task('my task')
-        s.ensure_task('my task2')
+        s.ensure_atom(test_utils.NoopTask('my task'))
+        s.ensure_atom(test_utils.NoopTask('my task2'))
         s.save('my task', 'foo')
         expected = {
             'my task': (states.SUCCESS, states.EXECUTE),
@@ -89,7 +89,9 @@ class StorageTestMixin(object):
     def test_ensure_task_flow_detail(self):
         _lb, flow_detail = p_utils.temporary_flow_detail(self.backend)
         s = self._get_storage(flow_detail)
-        s.ensure_task('my task', '3.11')
+        t = test_utils.NoopTask('my task')
+        t.version = (3, 11)
+        s.ensure_atom(t)
         td = flow_detail.find(s.get_atom_uuid('my task'))
         self.assertIsNotNone(td)
         self.assertEqual(td.name, 'my task')
@@ -108,12 +110,12 @@ class StorageTestMixin(object):
         td = logbook.TaskDetail(name='my_task', uuid='42')
         flow_detail.add(td)
         s = self._get_storage(flow_detail)
-        s.ensure_task('my_task')
+        s.ensure_atom(test_utils.NoopTask('my_task'))
         self.assertEqual('42', s.get_atom_uuid('my_task'))
 
     def test_save_and_get(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         s.save('my task', 5)
         self.assertEqual(s.get('my task'), 5)
         self.assertEqual(s.fetch_all(), {})
@@ -121,62 +123,62 @@ class StorageTestMixin(object):
 
     def test_save_and_get_other_state(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         s.save('my task', 5, states.FAILURE)
         self.assertEqual(s.get('my task'), 5)
         self.assertEqual(s.get_atom_state('my task'), states.FAILURE)
 
     def test_save_and_get_cached_failure(self):
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
         s = self._get_storage()
-        s.ensure_task('my task')
-        s.save('my task', failure, states.FAILURE)
-        self.assertEqual(s.get('my task'), failure)
+        s.ensure_atom(test_utils.NoopTask('my task'))
+        s.save('my task', a_failure, states.FAILURE)
+        self.assertEqual(s.get('my task'), a_failure)
         self.assertEqual(s.get_atom_state('my task'), states.FAILURE)
         self.assertTrue(s.has_failures())
-        self.assertEqual(s.get_failures(), {'my task': failure})
+        self.assertEqual(s.get_failures(), {'my task': a_failure})
 
     def test_save_and_get_non_cached_failure(self):
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
         s = self._get_storage()
-        s.ensure_task('my task')
-        s.save('my task', failure, states.FAILURE)
-        self.assertEqual(s.get('my task'), failure)
+        s.ensure_atom(test_utils.NoopTask('my task'))
+        s.save('my task', a_failure, states.FAILURE)
+        self.assertEqual(s.get('my task'), a_failure)
         s._failures['my task'] = None
-        self.assertTrue(failure.matches(s.get('my task')))
+        self.assertTrue(a_failure.matches(s.get('my task')))
 
     def test_get_failure_from_reverted_task(self):
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
 
         s = self._get_storage()
-        s.ensure_task('my task')
-        s.save('my task', failure, states.FAILURE)
+        s.ensure_atom(test_utils.NoopTask('my task'))
+        s.save('my task', a_failure, states.FAILURE)
 
         s.set_atom_state('my task', states.REVERTING)
-        self.assertEqual(s.get('my task'), failure)
+        self.assertEqual(s.get('my task'), a_failure)
 
         s.set_atom_state('my task', states.REVERTED)
-        self.assertEqual(s.get('my task'), failure)
+        self.assertEqual(s.get('my task'), a_failure)
 
     def test_get_failure_after_reload(self):
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
         s = self._get_storage()
-        s.ensure_task('my task')
-        s.save('my task', failure, states.FAILURE)
+        s.ensure_atom(test_utils.NoopTask('my task'))
+        s.save('my task', a_failure, states.FAILURE)
         s2 = self._get_storage(s._flowdetail)
         self.assertTrue(s2.has_failures())
         self.assertEqual(1, len(s2.get_failures()))
-        self.assertTrue(failure.matches(s2.get('my task')))
+        self.assertTrue(a_failure.matches(s2.get('my task')))
         self.assertEqual(s2.get_atom_state('my task'), states.FAILURE)
 
     def test_get_non_existing_var(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         self.assertRaises(exceptions.NotFound, s.get, 'my task')
 
     def test_reset(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         s.save('my task', 5)
         s.reset('my task')
         self.assertEqual(s.get_atom_state('my task'), states.PENDING)
@@ -184,13 +186,13 @@ class StorageTestMixin(object):
 
     def test_reset_unknown_task(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         self.assertEqual(s.reset('my task'), None)
 
     def test_fetch_by_name(self):
         s = self._get_storage()
         name = 'my result'
-        s.ensure_task('my task', '1.0', {name: None})
+        s.ensure_atom(test_utils.NoopTask('my task', provides=name))
         s.save('my task', 5)
         self.assertEqual(s.fetch(name), 5)
         self.assertEqual(s.fetch_all(), {name: 5})
@@ -203,7 +205,7 @@ class StorageTestMixin(object):
 
     def test_task_metadata_update_with_none(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         s.update_atom_metadata('my task', None)
         self.assertEqual(s.get_task_progress('my task'), 0.0)
         s.set_task_progress('my task', 0.5)
@@ -213,13 +215,13 @@ class StorageTestMixin(object):
 
     def test_default_task_progress(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         self.assertEqual(s.get_task_progress('my task'), 0.0)
         self.assertEqual(s.get_task_progress_details('my task'), None)
 
     def test_task_progress(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
 
         s.set_task_progress('my task', 0.5, {'test_data': 11})
         self.assertEqual(s.get_task_progress('my task'), 0.5)
@@ -244,7 +246,7 @@ class StorageTestMixin(object):
 
     def test_task_progress_erase(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
 
         s.set_task_progress('my task', 0.8, {})
         self.assertEqual(s.get_task_progress('my task'), 0.8)
@@ -253,24 +255,22 @@ class StorageTestMixin(object):
     def test_fetch_result_not_ready(self):
         s = self._get_storage()
         name = 'my result'
-        s.ensure_task('my task', result_mapping={name: None})
+        s.ensure_atom(test_utils.NoopTask('my task', provides=name))
         self.assertRaises(exceptions.NotFound, s.get, name)
         self.assertEqual(s.fetch_all(), {})
 
     def test_save_multiple_results(self):
         s = self._get_storage()
-        result_mapping = {'foo': 0, 'bar': 1, 'whole': None}
-        s.ensure_task('my task', result_mapping=result_mapping)
+        s.ensure_atom(test_utils.NoopTask('my task', provides=['foo', 'bar']))
         s.save('my task', ('spam', 'eggs'))
         self.assertEqual(s.fetch_all(), {
             'foo': 'spam',
             'bar': 'eggs',
-            'whole': ('spam', 'eggs')
         })
 
     def test_mapping_none(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         s.save('my task', 5)
         self.assertEqual(s.fetch_all(), {})
 
@@ -314,7 +314,7 @@ class StorageTestMixin(object):
         s = self._get_storage(threaded=True)
 
         def ensure_my_task():
-            s.ensure_task('my_task', result_mapping={})
+            s.ensure_atom(test_utils.NoopTask('my_task'))
 
         threads = []
         for i in range(0, self.thread_count):
@@ -357,7 +357,7 @@ class StorageTestMixin(object):
     def test_set_and_get_task_state(self):
         s = self._get_storage()
         state = states.PENDING
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         s.set_atom_state('my task', state)
         self.assertEqual(s.get_atom_state('my task'), state)
 
@@ -368,7 +368,7 @@ class StorageTestMixin(object):
 
     def test_task_by_name(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         self.assertTrue(uuidutils.is_uuid_like(s.get_atom_uuid('my task')))
 
     def test_transient_storage_fetch_all(self):
@@ -423,104 +423,85 @@ class StorageTestMixin(object):
         s.set_flow_state(states.SUCCESS)
         self.assertEqual(s.get_flow_state(), states.SUCCESS)
 
-    @mock.patch.object(storage.LOG, 'warning')
-    def test_result_is_checked(self, mocked_warning):
+    def test_result_is_checked(self):
         s = self._get_storage()
-        s.ensure_task('my task', result_mapping={'result': 'key'})
+        s.ensure_atom(test_utils.NoopTask('my task', provides=set(['result'])))
         s.save('my task', {})
-        mocked_warning.assert_called_once_with(
-            mock.ANY, 'my task', 'key', 'result')
         self.assertRaisesRegexp(exceptions.NotFound,
                                 '^Unable to find result', s.fetch, 'result')
 
-    @mock.patch.object(storage.LOG, 'warning')
-    def test_empty_result_is_checked(self, mocked_warning):
+    def test_empty_result_is_checked(self):
         s = self._get_storage()
-        s.ensure_task('my task', result_mapping={'a': 0})
+        s.ensure_atom(test_utils.NoopTask('my task', provides=['a']))
         s.save('my task', ())
-        mocked_warning.assert_called_once_with(
-            mock.ANY, 'my task', 0, 'a')
         self.assertRaisesRegexp(exceptions.NotFound,
                                 '^Unable to find result', s.fetch, 'a')
 
-    @mock.patch.object(storage.LOG, 'warning')
-    def test_short_result_is_checked(self, mocked_warning):
+    def test_short_result_is_checked(self):
         s = self._get_storage()
-        s.ensure_task('my task', result_mapping={'a': 0, 'b': 1})
+        s.ensure_atom(test_utils.NoopTask('my task', provides=['a', 'b']))
         s.save('my task', ['result'])
-        mocked_warning.assert_called_once_with(
-            mock.ANY, 'my task', 1, 'b')
         self.assertEqual(s.fetch('a'), 'result')
         self.assertRaisesRegexp(exceptions.NotFound,
                                 '^Unable to find result', s.fetch, 'b')
 
-    @mock.patch.object(storage.LOG, 'warning')
-    def test_multiple_providers_are_checked(self, mocked_warning):
-        s = self._get_storage()
-        s.ensure_task('my task', result_mapping={'result': 'key'})
-        self.assertEqual(mocked_warning.mock_calls, [])
-        s.ensure_task('my other task', result_mapping={'result': 'key'})
-        mocked_warning.assert_called_once_with(
-            mock.ANY, 'result')
-
-    @mock.patch.object(storage.LOG, 'warning')
-    def test_multiple_providers_with_inject_are_checked(self, mocked_warning):
-        s = self._get_storage()
-        s.inject({'result': 'DONE'})
-        self.assertEqual(mocked_warning.mock_calls, [])
-        s.ensure_task('my other task', result_mapping={'result': 'key'})
-        mocked_warning.assert_called_once_with(mock.ANY, 'result')
-
     def test_ensure_retry(self):
         s = self._get_storage()
-        s.ensure_retry('my retry')
+        s.ensure_atom(test_utils.NoopRetry('my retry'))
         history = s.get_retry_history('my retry')
-        self.assertEqual(history, [])
+        self.assertEqual([], list(history))
 
     def test_ensure_retry_and_task_with_same_name(self):
         s = self._get_storage()
-        s.ensure_task('my retry')
+        s.ensure_atom(test_utils.NoopTask('my retry'))
         self.assertRaisesRegexp(exceptions.Duplicate,
-                                '^Atom detail', s.ensure_retry, 'my retry')
+                                '^Atom detail', s.ensure_atom,
+                                test_utils.NoopRetry('my retry'))
 
     def test_save_retry_results(self):
         s = self._get_storage()
-        s.ensure_retry('my retry')
+        s.ensure_atom(test_utils.NoopRetry('my retry'))
         s.save('my retry', 'a')
         s.save('my retry', 'b')
         history = s.get_retry_history('my retry')
-        self.assertEqual(history, [('a', {}), ('b', {})])
+        self.assertEqual([('a', {}), ('b', {})], list(history))
+        self.assertEqual(['a', 'b'], list(history.provided_iter()))
 
     def test_save_retry_results_with_mapping(self):
         s = self._get_storage()
-        s.ensure_retry('my retry', result_mapping={'x': 0})
+        s.ensure_atom(test_utils.NoopRetry('my retry', provides=['x']))
         s.save('my retry', 'a')
         s.save('my retry', 'b')
         history = s.get_retry_history('my retry')
-        self.assertEqual(history, [('a', {}), ('b', {})])
-        self.assertEqual(s.fetch_all(), {'x': 'b'})
-        self.assertEqual(s.fetch('x'), 'b')
+        self.assertEqual([('a', {}), ('b', {})], list(history))
+        self.assertEqual(['a', 'b'], list(history.provided_iter()))
+        self.assertEqual({'x': 'b'}, s.fetch_all())
+        self.assertEqual('b', s.fetch('x'))
 
     def test_cleanup_retry_history(self):
         s = self._get_storage()
-        s.ensure_retry('my retry', result_mapping={'x': 0})
+        s.ensure_atom(test_utils.NoopRetry('my retry', provides=['x']))
         s.save('my retry', 'a')
         s.save('my retry', 'b')
         s.cleanup_retry_history('my retry', states.REVERTED)
         history = s.get_retry_history('my retry')
-        self.assertEqual(history, [])
+        self.assertEqual(list(history), [])
+        self.assertEqual(0, len(history))
         self.assertEqual(s.fetch_all(), {})
 
     def test_cached_retry_failure(self):
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
         s = self._get_storage()
-        s.ensure_retry('my retry', result_mapping={'x': 0})
+        s.ensure_atom(test_utils.NoopRetry('my retry', provides=['x']))
         s.save('my retry', 'a')
-        s.save('my retry', failure, states.FAILURE)
+        s.save('my retry', a_failure, states.FAILURE)
         history = s.get_retry_history('my retry')
-        self.assertEqual(history, [('a', {}), (failure, {})])
-        self.assertIs(s.has_failures(), True)
-        self.assertEqual(s.get_failures(), {'my retry': failure})
+        self.assertEqual([('a', {})], list(history))
+        self.assertTrue(history.caused_by(RuntimeError, include_retry=True))
+        self.assertIsNotNone(history.failure)
+        self.assertEqual(1, len(history))
+        self.assertTrue(s.has_failures())
+        self.assertEqual(s.get_failures(), {'my retry': a_failure})
 
     def test_logbook_get_unknown_atom_type(self):
         self.assertRaisesRegexp(TypeError,
@@ -529,14 +510,14 @@ class StorageTestMixin(object):
 
     def test_save_task_intention(self):
         s = self._get_storage()
-        s.ensure_task('my task')
+        s.ensure_atom(test_utils.NoopTask('my task'))
         s.set_atom_intention('my task', states.REVERT)
         intention = s.get_atom_intention('my task')
         self.assertEqual(intention, states.REVERT)
 
     def test_save_retry_intention(self):
         s = self._get_storage()
-        s.ensure_retry('my retry')
+        s.ensure_atom(test_utils.NoopTask('my retry'))
         s.set_atom_intention('my retry', states.RETRY)
         intention = s.get_atom_intention('my retry')
         self.assertEqual(intention, states.RETRY)

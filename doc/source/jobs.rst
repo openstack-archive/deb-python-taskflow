@@ -28,14 +28,14 @@ Definitions
 ===========
 
 Jobs
-  A :py:class:`job <taskflow.jobs.job.Job>` consists of a unique identifier,
+  A :py:class:`job <taskflow.jobs.base.Job>` consists of a unique identifier,
   name, and a reference to a :py:class:`logbook
   <taskflow.persistence.logbook.LogBook>` which contains the details of the
   work that has been or should be/will be completed to finish the work that has
   been created for that job.
 
 Jobboards
-  A :py:class:`jobboard <taskflow.jobs.jobboard.JobBoard>` is responsible for
+  A :py:class:`jobboard <taskflow.jobs.base.JobBoard>` is responsible for
   managing the posting, ownership, and delivery of jobs. It acts as the
   location where jobs can be posted, claimed and searched for; typically by
   iteration or notification.  Jobboards may be backed by different *capable*
@@ -44,6 +44,13 @@ Jobboards
   usage is as transparent as possible. This allows deployers or developers of a
   service that uses TaskFlow to select a jobboard implementation that fits
   their setup (and there intended usage) best.
+
+High level architecture
+=======================
+
+.. image:: img/jobboard.png
+   :height: 350px
+   :align: right
 
 Features
 ========
@@ -157,9 +164,12 @@ might look like:
             else:
                 # I finished it, now cleanup.
                 board.consume(my_job)
-                persistence.destroy_logbook(my_job.book.uuid)
+                persistence.get_connection().destroy_logbook(my_job.book.uuid)
         time.sleep(coffee_break_time)
     ...
+
+Types
+=====
 
 Zookeeper
 ---------
@@ -191,6 +201,11 @@ Additional *configuration* parameters:
   be used internally by `kazoo`_ to perform asynchronous operations, useful
   when your program uses eventlet and you want to instruct kazoo to use an
   eventlet compatible handler (such as the `eventlet handler`_).
+
+.. note::
+
+    See :py:class:`~taskflow.jobs.backends.impl_zookeeper.ZookeeperJobBoard`
+    for implementation details.
 
 Considerations
 ==============
@@ -244,9 +259,21 @@ the claim by then, therefore both would be *working* on a job.
 Interfaces
 ==========
 
+.. automodule:: taskflow.jobs.base
 .. automodule:: taskflow.jobs.backends
-.. automodule:: taskflow.jobs.job
-.. automodule:: taskflow.jobs.jobboard
+
+Implementations
+===============
+
+.. automodule:: taskflow.jobs.backends.impl_zookeeper
+
+Hierarchy
+=========
+
+.. inheritance-diagram::
+    taskflow.jobs.base
+    taskflow.jobs.backends.impl_zookeeper
+    :parts: 1
 
 .. _paradigm shift: https://wiki.openstack.org/wiki/TaskFlow/Paradigm_shifts#Workflow_ownership_transfer
 .. _zookeeper: http://zookeeper.apache.org/

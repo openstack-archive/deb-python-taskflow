@@ -28,11 +28,12 @@ top_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),
                                        os.pardir))
 sys.path.insert(0, top_dir)
 
+from oslo_utils import reflection
+
 from taskflow import engines
 from taskflow.listeners import printing
 from taskflow.patterns import unordered_flow as uf
 from taskflow import task
-from taskflow.utils import reflection
 
 # INTRO: This examples shows how unordered_flow can be used to create a large
 # number of fake volumes in parallel (or serially, depending on a constant that
@@ -64,13 +65,9 @@ VOLUME_COUNT = 5
 # time difference that this causes.
 SERIAL = False
 if SERIAL:
-    engine_conf = {
-        'engine': 'serial',
-    }
+    engine = 'serial'
 else:
-    engine_conf = {
-        'engine': 'parallel',
-    }
+    engine = 'parallel'
 
 
 class VolumeCreator(task.Task):
@@ -106,7 +103,7 @@ for i in range(0, VOLUME_COUNT):
 
 # Show how much time the overall engine loading and running takes.
 with show_time(name=flow.name.title()):
-    eng = engines.load(flow, engine_conf=engine_conf)
+    eng = engines.load(flow, engine=engine)
     # This context manager automatically adds (and automatically removes) a
     # helpful set of state transition notification printing helper utilities
     # that show you exactly what transitions the engine is going through

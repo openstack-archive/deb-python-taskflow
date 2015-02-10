@@ -19,10 +19,10 @@ try:
 except ImportError:
     from ordereddict import OrderedDict  # noqa
 
-import prettytable
 import six
 
 from taskflow import exceptions as excp
+from taskflow.types import table
 
 
 class _Jump(object):
@@ -31,6 +31,12 @@ class _Jump(object):
         self.name = name
         self.on_enter = on_enter
         self.on_exit = on_exit
+
+
+class FrozenMachine(Exception):
+    """Exception raised when a frozen machine is modified."""
+    def __init__(self):
+        super(FrozenMachine, self).__init__("Frozen machine can't be modified")
 
 
 class NotInitialized(excp.TaskFlowException):
@@ -62,6 +68,7 @@ class FSM(object):
         self._states = OrderedDict()
         self._start_state = start_state
         self._current = None
+        self.frozen = False
 
     @property
     def start_state(self):
@@ -89,12 +96,16 @@ class FSM(object):
         parameter which is the event that is being processed that caused the
         state transition.
         """
+        if self.frozen:
+            raise FrozenMachine()
         if state in self._states:
             raise excp.Duplicate("State '%s' already defined" % state)
         if on_enter is not None:
-            assert six.callable(on_enter), "On enter callback must be callable"
+            if not six.callable(on_enter):
+                raise ValueError("On enter callback must be callable")
         if on_exit is not None:
-            assert six.callable(on_exit), "On exit callback must be callable"
+            if not six.callable(on_exit):
+                raise ValueError("On exit callback must be callable")
         self._states[state] = {
             'terminal': bool(terminal),
             'reactions': {},
@@ -123,10 +134,13 @@ class FSM(object):
         this process typically repeats) until the state machine reaches a
         terminal state.
         """
+        if self.frozen:
+            raise FrozenMachine()
         if state not in self._states:
             raise excp.NotFound("Can not add a reaction to event '%s' for an"
                                 " undefined state '%s'" % (event, state))
-        assert six.callable(reaction), "Reaction callback must be callable"
+        if not six.callable(reaction):
+            raise ValueError("Reaction callback must be callable")
         if event not in self._states[state]['reactions']:
             self._states[state]['reactions'][event] = (reaction, args, kwargs)
         else:
@@ -135,6 +149,8 @@ class FSM(object):
 
     def add_transition(self, start, end, event):
         """Adds an allowed transition from start -> end for the given event."""
+        if self.frozen:
+            raise FrozenMachine()
         if start not in self._states:
             raise excp.NotFound("Can not add a transition on event '%s' that"
                                 " starts in a undefined state '%s'" % (event,
@@ -180,12 +196,32 @@ class FSM(object):
         if self._states[self._start_state]['terminal']:
             raise excp.InvalidState("Can not start from a terminal"
                                     " state '%s'" % (self._start_state))
-        self._current = _Jump(self._start_state, None, None)
+        # No on enter will be called, since we are priming the state machine
+        # and have not really transitioned from anything to get here, we will
+        # though allow 'on_exit' to be called on the event that causes this
+        # to be moved from...
+        self._current = _Jump(self._start_state, None,
+                              self._states[self._start_state]['on_exit'])
 
     def run(self, event, initialize=True):
         """Runs the state machine, using reactions only."""
-        for transition in self.run_iter(event, initialize=initialize):
+        for _transition in self.run_iter(event, initialize=initialize):
             pass
+
+    def copy(self):
+        """Copies the current state machine.
+
+        NOTE(harlowja): the copy will be left in an *uninitialized* state.
+        """
+        c = FSM(self.start_state)
+        c.frozen = self.frozen
+        for state, data in six.iteritems(self._states):
+            copied_data = data.copy()
+            copied_data['reactions'] = copied_data['reactions'].copy()
+            c._states[state] = copied_data
+        for state, data in six.iteritems(self._transitions):
+            c._transitions[state] = data.copy()
+        return c
 
     def run_iter(self, event, initialize=True):
         """Returns a iterator/generator that will run the state machine.
@@ -220,7 +256,12 @@ class FSM(object):
                 event = cb(old_state, new_state, event, *args, **kwargs)
 
     def __contains__(self, state):
+        """Returns if this state exists in the machines known states."""
         return state in self._states
+
+    def freeze(self):
+        """Freezes & stops addition of states, transitions, reactions..."""
+        self.frozen = True
 
     @property
     def states(self):
@@ -247,13 +288,34 @@ class FSM(object):
         NOTE(harlowja): the sort parameter can be provided to sort the states
         and transitions by sort order; with it being provided as false the rows
         will be iterated in addition order instead.
+
+        **Example**::
+
+            >>> from taskflow.types import fsm
+            >>> f = fsm.FSM("sits")
+            >>> f.add_state("sits")
+            >>> f.add_state("barks")
+            >>> f.add_state("wags tail")
+            >>> f.add_transition("sits", "barks", "squirrel!")
+            >>> f.add_transition("barks", "wags tail", "gets petted")
+            >>> f.add_transition("wags tail", "sits", "gets petted")
+            >>> f.add_transition("wags tail", "barks", "squirrel!")
+            >>> print(f.pformat())
+            +-----------+-------------+-----------+----------+---------+
+                Start   |    Event    |    End    | On Enter | On Exit
+            +-----------+-------------+-----------+----------+---------+
+                barks   | gets petted | wags tail |          |
+               sits[^]  |  squirrel!  |   barks   |          |
+              wags tail | gets petted |   sits    |          |
+              wags tail |  squirrel!  |   barks   |          |
+            +-----------+-------------+-----------+----------+---------+
         """
         def orderedkeys(data):
             if sort:
                 return sorted(six.iterkeys(data))
             return list(six.iterkeys(data))
-        tbl = prettytable.PrettyTable(
-            ["Start", "Event", "End", "On Enter", "On Exit"])
+        tbl = table.PleasantTable(["Start", "Event", "End",
+                                   "On Enter", "On Exit"])
         for state in orderedkeys(self._states):
             prefix_markings = []
             if self.current_state == state:
@@ -287,4 +349,4 @@ class FSM(object):
                     tbl.add_row(row)
             else:
                 tbl.add_row([pretty_state, "", "", "", ""])
-        return tbl.get_string(print_empty=True)
+        return tbl.pformat()

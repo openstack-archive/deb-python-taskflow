@@ -13,23 +13,23 @@ and uses it to decide which :doc:`atom <atoms>` to run and when.
 TaskFlow provides different implementations of engines. Some may be easier to
 use (ie, require no additional infrastructure setup) and understand; others
 might require more complicated setup but provide better scalability. The idea
-and *ideal* is that deployers or developers of a service that uses TaskFlow can
+and *ideal* is that deployers or developers of a service that use TaskFlow can
 select an engine that suites their setup best without modifying the code of
 said service.
 
 Engines usually have different capabilities and configuration, but all of them
 **must** implement the same interface and preserve the semantics of patterns
-(e.g.  parts of :py:class:`linear flow <taskflow.patterns.linear_flow.Flow>`
-are run one after another, in order, even if engine is *capable* of running
-tasks in parallel).
+(e.g. parts of a :py:class:`.linear_flow.Flow`
+are run one after another, in order, even if the selected engine is *capable*
+of running tasks in parallel).
 
 Why they exist
 --------------
 
-An engine being the core component which actually makes your flows progress is
-likely a new concept for many programmers so let's describe how it operates in
-more depth and some of the reasoning behind why it exists. This will hopefully
-make it more clear on there value add to the TaskFlow library user.
+An engine being *the* core component which actually makes your flows progress
+is likely a new concept for many programmers so let's describe how it operates
+in more depth and some of the reasoning behind why it exists. This will
+hopefully make it more clear on there value add to the TaskFlow library user.
 
 First though let us discuss something most are familiar already with; the
 difference between `declarative`_ and `imperative`_ programming models. The
@@ -48,15 +48,15 @@ more of a *pure* function that executes, reverts and may require inputs and
 provide outputs). This is where engines get involved; they do the execution of
 the *what* defined via :doc:`atoms <atoms>`, tasks, flows and the relationships
 defined there-in and execute these in a well-defined manner (and the engine is
-responsible for *most* of the state manipulation instead).
+responsible for any state manipulation instead).
 
 This mix of imperative and declarative (with a stronger emphasis on the
-declarative model) allows for the following functionality to be possible:
+declarative model) allows for the following functionality to become possible:
 
 * Enhancing reliability: Decoupling of state alterations from what should be
   accomplished allows for a *natural* way of resuming by allowing the engine to
-  track the current state and know at which point a flow is in and how to get
-  back into that state when resumption occurs.
+  track the current state and know at which point a workflow is in and how to
+  get back into that state when resumption occurs.
 * Enhancing scalability: When a engine is responsible for executing your
   desired work it becomes possible to alter the *how* in the future by creating
   new types of execution backends (for example the worker model which does not
@@ -83,13 +83,14 @@ Of course these kind of features can come with some drawbacks:
   away from (and this is likely a mindset change for programmers used to the
   imperative model). We have worked to make this less of a concern by creating
   and encouraging the usage of :doc:`persistence <persistence>`, to help make
-  it possible to have some level of provided state transfer mechanism.
+  it possible to have state and tranfer that state via a argument input and
+  output mechanism.
 * Depending on how much imperative code exists (and state inside that code)
-  there can be *significant* rework of that code and converting or refactoring
-  it to these new concepts.  We have tried to help here by allowing you to have
-  tasks that internally use regular python code (and internally can be written
-  in an imperative style) as well as by providing examples and these developer
-  docs; helping this process be as seamless as possible.
+  there *may* be *significant* rework of that code and converting or
+  refactoring it to these new concepts. We have tried to help here by allowing
+  you to have tasks that internally use regular python code (and internally can
+  be written in an imperative style) as well as by providing
+  :doc:`examples <examples>` that show how to use these concepts.
 * Another one of the downsides of decoupling the *what* from the *how*  is that
   it may become harder to use traditional techniques to debug failures
   (especially if remote workers are involved). We try to help here by making it
@@ -110,16 +111,16 @@ All engines are mere classes that implement the same interface, and of course
 it is possible to import them and create instances just like with any classes
 in Python. But the easier (and recommended) way for creating an engine is using
 the engine helper functions. All of these functions are imported into the
-`taskflow.engines` module namespace, so the typical usage of these functions
+``taskflow.engines`` module namespace, so the typical usage of these functions
 might look like::
 
     from taskflow import engines
 
     ...
     flow = make_flow()
-    engine = engines.load(flow, engine_conf=my_conf,
-                          backend=my_persistence_conf)
-    engine.run
+    eng = engines.load(flow, engine='serial', backend=my_persistence_conf)
+    eng.run()
+    ...
 
 
 .. automodule:: taskflow.engines.helpers
@@ -128,59 +129,74 @@ Usage
 =====
 
 To select which engine to use and pass parameters to an engine you should use
-the ``engine_conf`` parameter any helper factory function accepts. It may be:
+the ``engine`` parameter any engine helper function accepts and for any engine
+specific options use the ``kwargs`` parameter.
 
-* a string, naming engine type;
-* a dictionary, holding engine type with key ``'engine'`` and possibly
-  type-specific engine configuration parameters.
+Types
+=====
 
-Single-Threaded
----------------
+Serial
+------
 
 **Engine type**: ``'serial'``
 
-Runs all tasks on the single thread -- the same thread `engine.run()` is called
-on. This engine is used by default.
+Runs all tasks on a single thread -- the same thread ``engine.run()`` is
+called from.
+
+.. note::
+
+    This engine is used by default.
 
 .. tip::
 
     If eventlet is used then this engine will not block other threads
-    from running as eventlet automatically creates a co-routine system (using
-    greenthreads and monkey patching). See `eventlet <http://eventlet.net/>`_
-    and `greenlet <http://greenlet.readthedocs.org/>`_ for more details.
+    from running as eventlet automatically creates a implicit co-routine
+    system (using greenthreads and monkey patching). See
+    `eventlet <http://eventlet.net/>`_ and
+    `greenlet <http://greenlet.readthedocs.org/>`_ for more details.
 
 Parallel
 --------
 
 **Engine type**: ``'parallel'``
 
-Parallel engine schedules tasks onto different threads to run them in parallel.
-
-Additional supported keyword arguments:
-
-* ``executor``: a object that implements a :pep:`3148` compatible `executor`_
-  interface; it will be used for scheduling tasks. You can use instances of a
-  `thread pool executor`_ or a :py:class:`green executor
-  <taskflow.utils.eventlet_utils.GreenExecutor>` (which internally uses
-  `eventlet <http://eventlet.net/>`_ and greenthread pools).
+A parallel engine schedules tasks onto different threads/processes to allow for
+running non-dependent tasks simultaneously. See the documentation of
+:py:class:`~taskflow.engines.action_engine.engine.ParallelActionEngine` for
+supported arguments that can be used to construct a parallel engine that runs
+using your desired execution model.
 
 .. tip::
 
-    Sharing executor between engine instances provides better
-    scalability by reducing thread creation and teardown as well as by reusing
-    existing pools (which is a good practice in general).
+    Sharing an executor between engine instances provides better
+    scalability by reducing thread/process creation and teardown as well as by
+    reusing existing pools (which is a good practice in general).
 
 .. note::
 
-    Running tasks with a `process pool executor`_ is not currently supported.
+    Running tasks with a `process pool executor`_ is **experimentally**
+    supported. This is mainly due to the `futures backport`_ and
+    the `multiprocessing`_ module that exist in older versions of python not
+    being as up to date (with important fixes such as :pybug:`4892`,
+    :pybug:`6721`, :pybug:`9205`, :pybug:`11635`, :pybug:`16284`,
+    :pybug:`22393` and others...) as the most recent python version (which
+    themselves have a variety of ongoing/recent bugs).
 
-Worker-Based
-------------
+Workers
+-------
 
-**Engine type**: ``'worker-based'``
+**Engine type**: ``'worker-based'`` or ``'workers'``
 
-For more information, please see :doc:`workers <workers>` for more details on
-how the worker based engine operates (and the design decisions behind it).
+.. note:: Since this engine is significantly more complicated (and
+          different) then the others we thought it appropriate to devote a
+          whole documentation section to it.
+
+For further information, please refer to the the following:
+
+.. toctree::
+   :maxdepth: 2
+
+   workers
 
 How they run
 ============
@@ -241,6 +257,14 @@ object starts to take over and begins going through the stages listed
 below (for a more visual diagram/representation see
 the :ref:`engine state diagram <engine states>`).
 
+.. note::
+
+   The engine will respect the constraints imposed by the flow. For example,
+   if Engine is executing a :py:class:`.linear_flow.Flow` then it is
+   constrained by the dependency-graph which is linear in this case, and hence
+   using a Parallel Engine may not yield any benefits if one is looking for
+   concurrency.
+
 Resumption
 ^^^^^^^^^^
 
@@ -265,13 +289,13 @@ Scheduling
 ^^^^^^^^^^
 
 This stage selects which atoms are eligible to run by using a
-:py:class:`~taskflow.engines.action_engine.runtime.Scheduler` implementation
+:py:class:`~taskflow.engines.action_engine.scheduler.Scheduler` implementation
 (the default implementation looks at there intention, checking if predecessor
 atoms have ran and so-on, using a
 :py:class:`~taskflow.engines.action_engine.analyzer.Analyzer` helper
 object as needed) and submits those atoms to a previously provided compatible
 `executor`_ for asynchronous execution. This
-:py:class:`~taskflow.engines.action_engine.runtime.Scheduler` will return a
+:py:class:`~taskflow.engines.action_engine.scheduler.Scheduler` will return a
 `future`_ object for each atom scheduled; all of which are collected into a
 list of not done futures. This will end the initial round of scheduling and at
 this point the engine enters the :ref:`waiting <waiting>` stage.
@@ -284,7 +308,7 @@ Waiting
 In this stage the engine waits for any of the future objects previously
 submitted to complete. Once one of the future objects completes (or fails) that
 atoms result will be examined and finalized using a
-:py:class:`~taskflow.engines.action_engine.runtime.Completer` implementation.
+:py:class:`~taskflow.engines.action_engine.completer.Completer` implementation.
 It typically will persist results to a provided persistence backend (saved
 into the corresponding :py:class:`~taskflow.persistence.logbook.AtomDetail`
 and :py:class:`~taskflow.persistence.logbook.FlowDetail` objects) and reflect
@@ -322,24 +346,33 @@ saved for this execution.
 Interfaces
 ==========
 
+.. automodule:: taskflow.engines.base
+
+Implementations
+===============
+
 .. automodule:: taskflow.engines.action_engine.analyzer
 .. automodule:: taskflow.engines.action_engine.compiler
+.. automodule:: taskflow.engines.action_engine.completer
 .. automodule:: taskflow.engines.action_engine.engine
+.. automodule:: taskflow.engines.action_engine.executor
 .. automodule:: taskflow.engines.action_engine.runner
 .. automodule:: taskflow.engines.action_engine.runtime
-.. automodule:: taskflow.engines.base
+.. automodule:: taskflow.engines.action_engine.scheduler
+.. automodule:: taskflow.engines.action_engine.scopes
 
 Hierarchy
 =========
 
 .. inheritance-diagram::
-    taskflow.engines.base
-    taskflow.engines.action_engine.engine
-    taskflow.engines.worker_based.engine
+    taskflow.engines.action_engine.engine.ActionEngine
+    taskflow.engines.base.Engine
+    taskflow.engines.worker_based.engine.WorkerBasedActionEngine
     :parts: 1
 
+.. _multiprocessing: https://docs.python.org/2/library/multiprocessing.html
 .. _future: https://docs.python.org/dev/library/concurrent.futures.html#future-objects
 .. _executor: https://docs.python.org/dev/library/concurrent.futures.html#concurrent.futures.Executor
 .. _networkx: https://networkx.github.io/
-.. _thread pool executor: https://docs.python.org/dev/library/concurrent.futures.html#threadpoolexecutor
+.. _futures backport: https://pypi.python.org/pypi/futures
 .. _process pool executor: https://docs.python.org/dev/library/concurrent.futures.html#processpoolexecutor

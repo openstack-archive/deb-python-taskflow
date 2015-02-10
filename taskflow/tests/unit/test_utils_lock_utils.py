@@ -21,7 +21,10 @@ import time
 from concurrent import futures
 
 from taskflow import test
+from taskflow.test import mock
+from taskflow.tests import utils as test_utils
 from taskflow.utils import lock_utils
+from taskflow.utils import threading_utils
 
 # NOTE(harlowja): Sleep a little so time.time() can not be the same (which will
 # cause false positives when our overlap detection code runs). If there are
@@ -85,6 +88,220 @@ def _spawn_variation(readers, writers, max_workers=None):
     return (writer_times, reader_times)
 
 
+class MultilockTest(test.TestCase):
+    def test_empty_error(self):
+        self.assertRaises(ValueError,
+                          lock_utils.MultiLock, [])
+        self.assertRaises(ValueError,
+                          lock_utils.MultiLock, ())
+        self.assertRaises(ValueError,
+                          lock_utils.MultiLock, iter([]))
+
+    def test_creation(self):
+        locks = []
+        for _i in range(0, 10):
+            locks.append(threading.Lock())
+        n_lock = lock_utils.MultiLock(locks)
+        self.assertEqual(0, n_lock.obtained)
+        self.assertEqual(len(locks), len(n_lock))
+
+    def test_acquired(self):
+        lock1 = threading.Lock()
+        lock2 = threading.Lock()
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+        self.assertTrue(n_lock.acquire())
+        try:
+            self.assertTrue(lock1.locked())
+            self.assertTrue(lock2.locked())
+        finally:
+            n_lock.release()
+        self.assertFalse(lock1.locked())
+        self.assertFalse(lock2.locked())
+
+    def test_acquired_context_manager(self):
+        lock1 = threading.Lock()
+        n_lock = lock_utils.MultiLock([lock1])
+        with n_lock as gotten:
+            self.assertTrue(gotten)
+            self.assertTrue(lock1.locked())
+        self.assertFalse(lock1.locked())
+        self.assertEqual(0, n_lock.obtained)
+
+    def test_partial_acquired(self):
+        lock1 = threading.Lock()
+        lock2 = mock.create_autospec(threading.Lock())
+        lock2.acquire.return_value = False
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+        with n_lock as gotten:
+            self.assertFalse(gotten)
+            self.assertTrue(lock1.locked())
+            self.assertEqual(1, n_lock.obtained)
+            self.assertEqual(2, len(n_lock))
+        self.assertEqual(0, n_lock.obtained)
+
+    def test_partial_acquired_failure(self):
+        lock1 = threading.Lock()
+        lock2 = mock.create_autospec(threading.Lock())
+        lock2.acquire.side_effect = RuntimeError("Broke")
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+        self.assertRaises(threading.ThreadError, n_lock.acquire)
+        self.assertEqual(1, n_lock.obtained)
+        n_lock.release()
+
+    def test_release_failure(self):
+        lock1 = threading.Lock()
+        lock2 = mock.create_autospec(threading.Lock())
+        lock2.acquire.return_value = True
+        lock2.release.side_effect = RuntimeError("Broke")
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+        self.assertTrue(n_lock.acquire())
+        self.assertEqual(2, n_lock.obtained)
+        self.assertRaises(threading.ThreadError, n_lock.release)
+        self.assertEqual(2, n_lock.obtained)
+        lock2.release.side_effect = None
+        n_lock.release()
+        self.assertEqual(0, n_lock.obtained)
+
+    def test_release_partial_failure(self):
+        lock1 = threading.Lock()
+        lock2 = mock.create_autospec(threading.Lock())
+        lock2.acquire.return_value = True
+        lock2.release.side_effect = RuntimeError("Broke")
+        lock3 = threading.Lock()
+        n_lock = lock_utils.MultiLock((lock1, lock2, lock3))
+        self.assertTrue(n_lock.acquire())
+        self.assertEqual(3, n_lock.obtained)
+        self.assertRaises(threading.ThreadError, n_lock.release)
+        self.assertEqual(2, n_lock.obtained)
+        lock2.release.side_effect = None
+        n_lock.release()
+        self.assertEqual(0, n_lock.obtained)
+
+    def test_acquired_pass(self):
+        activated = collections.deque()
+        lock1 = threading.Lock()
+        lock2 = threading.Lock()
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+
+        def critical_section():
+            start = time.time()
+            time.sleep(0.05)
+            end = time.time()
+            activated.append((start, end))
+
+        def run():
+            with n_lock:
+                critical_section()
+
+        threads = []
+        for _i in range(0, 20):
+            t = threading_utils.daemon_thread(run)
+            threads.append(t)
+            t.start()
+        while threads:
+            t = threads.pop()
+            t.join()
+        for (start, end) in activated:
+            self.assertEqual(1, _find_overlaps(activated, start, end))
+
+        self.assertFalse(lock1.locked())
+        self.assertFalse(lock2.locked())
+
+    def test_acquired_fail(self):
+        activated = collections.deque()
+        lock1 = threading.Lock()
+        lock2 = threading.Lock()
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+
+        def run():
+            with n_lock:
+                start = time.time()
+                time.sleep(0.05)
+                end = time.time()
+                activated.append((start, end))
+
+        def run_fail():
+            try:
+                with n_lock:
+                    raise RuntimeError()
+            except RuntimeError:
+                pass
+
+        threads = []
+        for i in range(0, 20):
+            if i % 2 == 1:
+                target = run_fail
+            else:
+                target = run
+            t = threading_utils.daemon_thread(target)
+            threads.append(t)
+            t.start()
+        while threads:
+            t = threads.pop()
+            t.join()
+
+        for (start, end) in activated:
+            self.assertEqual(1, _find_overlaps(activated, start, end))
+        self.assertFalse(lock1.locked())
+        self.assertFalse(lock2.locked())
+
+    def test_double_acquire_single(self):
+        activated = collections.deque()
+
+        def run():
+            start = time.time()
+            time.sleep(0.05)
+            end = time.time()
+            activated.append((start, end))
+
+        lock1 = threading.RLock()
+        lock2 = threading.RLock()
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+        with n_lock:
+            run()
+            with n_lock:
+                run()
+            run()
+
+        for (start, end) in activated:
+            self.assertEqual(1, _find_overlaps(activated, start, end))
+
+    def test_double_acquire_many(self):
+        activated = collections.deque()
+        n_lock = lock_utils.MultiLock((threading.RLock(), threading.RLock()))
+
+        def critical_section():
+            start = time.time()
+            time.sleep(0.05)
+            end = time.time()
+            activated.append((start, end))
+
+        def run():
+            with n_lock:
+                critical_section()
+                with n_lock:
+                    critical_section()
+                critical_section()
+
+        threads = []
+        for i in range(0, 20):
+            t = threading_utils.daemon_thread(run)
+            threads.append(t)
+            t.start()
+        while threads:
+            t = threads.pop()
+            t.join()
+
+        for (start, end) in activated:
+            self.assertEqual(1, _find_overlaps(activated, start, end))
+
+    def test_no_acquire_release(self):
+        lock1 = threading.Lock()
+        lock2 = threading.Lock()
+        n_lock = lock_utils.MultiLock((lock1, lock2))
+        self.assertRaises(threading.ThreadError, n_lock.release)
+
+
 class ReadWriteLockTest(test.TestCase):
     def test_writer_abort(self):
         lock = lock_utils.ReaderWriterLock()
@@ -135,7 +352,7 @@ class ReadWriteLockTest(test.TestCase):
     def test_double_reader_writer(self):
         lock = lock_utils.ReaderWriterLock()
         activated = collections.deque()
-        active = threading.Event()
+        active = threading_utils.Event()
 
         def double_reader():
             with lock.read_lock():
@@ -149,11 +366,11 @@ class ReadWriteLockTest(test.TestCase):
             with lock.write_lock():
                 activated.append(lock.owner)
 
-        reader = threading.Thread(target=double_reader)
+        reader = threading_utils.daemon_thread(double_reader)
         reader.start()
-        active.wait()
+        self.assertTrue(active.wait(test_utils.WAIT_TIMEOUT))
 
-        writer = threading.Thread(target=happy_writer)
+        writer = threading_utils.daemon_thread(happy_writer)
         writer.start()
 
         reader.join()

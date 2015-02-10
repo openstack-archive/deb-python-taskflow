@@ -12,16 +12,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import logging
-import threading
-
 import six
 
 from taskflow.conductors import base
 from taskflow import exceptions as excp
 from taskflow.listeners import logging as logging_listener
+from taskflow import logging
 from taskflow.types import timing as tt
+from taskflow.utils import async_utils
 from taskflow.utils import lock_utils
+from taskflow.utils import threading_utils
 
 LOG = logging.getLogger(__name__)
 WAIT_TIMEOUT = 0.5
@@ -50,11 +50,11 @@ class SingleThreadedConductor(base.Conductor):
     upon the jobboard capabilities to automatically abandon these jobs.
     """
 
-    def __init__(self, name, jobboard, engine_conf, persistence,
-                 wait_timeout=None):
-        super(SingleThreadedConductor, self).__init__(name, jobboard,
-                                                      engine_conf,
-                                                      persistence)
+    def __init__(self, name, jobboard, persistence,
+                 engine=None, engine_options=None, wait_timeout=None):
+        super(SingleThreadedConductor, self).__init__(
+            name, jobboard, persistence,
+            engine=engine, engine_options=engine_options)
         if wait_timeout is None:
             wait_timeout = WAIT_TIMEOUT
         if isinstance(wait_timeout, (int, float) + six.string_types):
@@ -63,7 +63,7 @@ class SingleThreadedConductor(base.Conductor):
             self._wait_timeout = wait_timeout
         else:
             raise ValueError("Invalid timeout literal: %s" % (wait_timeout))
-        self._dead = threading.Event()
+        self._dead = threading_utils.Event()
 
     @lock_utils.locked
     def stop(self, timeout=None):
@@ -80,8 +80,7 @@ class SingleThreadedConductor(base.Conductor):
         be honored in the future) and False will be returned indicating this.
         """
         self._wait_timeout.interrupt()
-        self._dead.wait(timeout)
-        return self._dead.is_set()
+        return self._dead.wait(timeout)
 
     @property
     def dispatching(self):
@@ -116,7 +115,7 @@ class SingleThreadedConductor(base.Conductor):
                          job, exc_info=True)
             else:
                 LOG.info("Job completed successfully: %s", job)
-        return consume
+        return async_utils.make_completed_future(consume)
 
     def run(self):
         self._dead.clear()
@@ -136,12 +135,13 @@ class SingleThreadedConductor(base.Conductor):
                         continue
                     consume = False
                     try:
-                        consume = self._dispatch_job(job)
+                        f = self._dispatch_job(job)
                     except Exception:
                         LOG.warn("Job dispatching failed: %s", job,
                                  exc_info=True)
                     else:
                         dispatched += 1
+                        consume = f.result()
                     try:
                         if consume:
                             self._jobboard.consume(job, self._name)

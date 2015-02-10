@@ -16,15 +16,15 @@
 #    under the License.
 
 import errno
-import logging
 import os
 import shutil
 
+from oslo_serialization import jsonutils
 import six
 
 from taskflow import exceptions as exc
-from taskflow.openstack.common import jsonutils
-from taskflow.persistence.backends import base
+from taskflow import logging
+from taskflow.persistence import base
 from taskflow.persistence import logbook
 from taskflow.utils import lock_utils
 from taskflow.utils import misc
@@ -46,11 +46,11 @@ class DirBackend(base.Backend):
     guarantee that there will be no interprocess race conditions when
     writing and reading by using a consistent hierarchy of file based locks.
 
-    Example conf:
+    Example configuration::
 
-    conf = {
-        "path": "/tmp/taskflow",
-    }
+        conf = {
+            "path": "/tmp/taskflow",
+        }
     """
     def __init__(self, conf):
         super(DirBackend, self).__init__(conf)

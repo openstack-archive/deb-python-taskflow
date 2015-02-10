@@ -14,6 +14,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
+import os
+
 import networkx as nx
 import six
 
@@ -76,7 +79,7 @@ class DiGraph(nx.DiGraph):
                 buf.write(" --> %s" % (cycle[i]))
             buf.write(" --> %s" % (cycle[0]))
             lines.append("  %s" % buf.getvalue())
-        return "\n".join(lines)
+        return os.linesep.join(lines)
 
     def export_to_dot(self):
         """Exports the graph to a dot format (requires pydot library)."""
@@ -97,6 +100,26 @@ class DiGraph(nx.DiGraph):
         for n in self.nodes_iter():
             if not len(self.predecessors(n)):
                 yield n
+
+    def bfs_predecessors_iter(self, n):
+        """Iterates breadth first over *all* predecessors of a given node.
+
+        This will go through the nodes predecessors, then the predecessor nodes
+        predecessors and so on until no more predecessors are found.
+
+        NOTE(harlowja): predecessor cycles (if they exist) will not be iterated
+        over more than once (this prevents infinite iteration).
+        """
+        visited = set([n])
+        queue = collections.deque(self.predecessors_iter(n))
+        while queue:
+            pred = queue.popleft()
+            if pred not in visited:
+                yield pred
+                visited.add(pred)
+                for pred_pred in self.predecessors_iter(pred):
+                    if pred_pred not in visited:
+                        queue.append(pred_pred)
 
 
 def merge_graphs(graphs, allow_overlaps=False):

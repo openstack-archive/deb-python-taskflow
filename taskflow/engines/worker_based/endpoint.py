@@ -14,8 +14,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_utils import reflection
+
 from taskflow.engines.action_engine import executor
-from taskflow.utils import reflection
 
 
 class Endpoint(object):
@@ -33,18 +34,16 @@ class Endpoint(object):
     def name(self):
         return self._task_cls_name
 
-    def _get_task(self, name=None):
+    def generate(self, name=None):
         # NOTE(skudriashev): Note that task is created here with the `name`
         # argument passed to its constructor. This will be a problem when
         # task's constructor requires any other arguments.
         return self._task_cls(name=name)
 
-    def execute(self, task_name, **kwargs):
-        task, event, result = self._executor.execute_task(
-            self._get_task(task_name), **kwargs).result()
+    def execute(self, task, **kwargs):
+        event, result = self._executor.execute_task(task, **kwargs).result()
         return result
 
-    def revert(self, task_name, **kwargs):
-        task, event, result = self._executor.revert_task(
-            self._get_task(task_name), **kwargs).result()
+    def revert(self, task, **kwargs):
+        event, result = self._executor.revert_task(task, **kwargs).result()
         return result

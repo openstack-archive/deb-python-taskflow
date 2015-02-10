@@ -14,22 +14,22 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import contextlib
-import threading
 
 from zake import fake_client
 
 from taskflow.conductors import single_threaded as stc
 from taskflow import engines
 from taskflow.jobs.backends import impl_zookeeper
-from taskflow.jobs import jobboard
+from taskflow.jobs import base
 from taskflow.patterns import linear_flow as lf
 from taskflow.persistence.backends import impl_memory
 from taskflow import states as st
 from taskflow import test
 from taskflow.tests import utils as test_utils
-from taskflow.utils import misc
 from taskflow.utils import persistence_utils as pu
+from taskflow.utils import threading_utils
 
 
 @contextlib.contextmanager
@@ -44,34 +44,26 @@ def close_many(*closeables):
 def test_factory(blowup):
     f = lf.Flow("test")
     if not blowup:
-        f.add(test_utils.SaveOrderTask('test1'))
+        f.add(test_utils.ProgressingTask('test1'))
     else:
         f.add(test_utils.FailingTask("test1"))
     return f
 
 
-def make_thread(conductor):
-    t = threading.Thread(target=conductor.run)
-    t.daemon = True
-    return t
-
-
 class SingleThreadedConductorTest(test_utils.EngineTestBase, test.TestCase):
+    ComponentBundle = collections.namedtuple('ComponentBundle',
+                                             ['board', 'client',
+                                              'persistence', 'conductor'])
+
     def make_components(self, name='testing', wait_timeout=0.1):
         client = fake_client.FakeClient()
         persistence = impl_memory.MemoryBackend()
         board = impl_zookeeper.ZookeeperJobBoard(name, {},
                                                  client=client,
                                                  persistence=persistence)
-        engine_conf = {
-            'engine': 'default',
-        }
-        conductor = stc.SingleThreadedConductor(name, board, engine_conf,
-                                                persistence, wait_timeout)
-        return misc.AttrDict(board=board,
-                             client=client,
-                             persistence=persistence,
-                             conductor=conductor)
+        conductor = stc.SingleThreadedConductor(name, board, persistence,
+                                                wait_timeout=wait_timeout)
+        return self.ComponentBundle(board, client, persistence, conductor)
 
     def test_connection(self):
         components = self.make_components()
@@ -86,23 +78,24 @@ class SingleThreadedConductorTest(test_utils.EngineTestBase, test.TestCase):
         components = self.make_components()
         components.conductor.connect()
         with close_many(components.conductor, components.client):
-            t = make_thread(components.conductor)
+            t = threading_utils.daemon_thread(components.conductor.run)
             t.start()
-            self.assertTrue(components.conductor.stop(0.5))
+            self.assertTrue(
+                components.conductor.stop(test_utils.WAIT_TIMEOUT))
             self.assertFalse(components.conductor.dispatching)
             t.join()
 
     def test_run(self):
         components = self.make_components()
         components.conductor.connect()
-        consumed_event = threading.Event()
+        consumed_event = threading_utils.Event()
 
         def on_consume(state, details):
             consumed_event.set()
 
-        components.board.notifier.register(jobboard.REMOVAL, on_consume)
+        components.board.notifier.register(base.REMOVAL, on_consume)
         with close_many(components.conductor, components.client):
-            t = make_thread(components.conductor)
+            t = threading_utils.daemon_thread(components.conductor.run)
             t.start()
             lb, fd = pu.temporary_flow_detail(components.persistence)
             engines.save_factory_details(fd, test_factory,
@@ -110,9 +103,8 @@ class SingleThreadedConductorTest(test_utils.EngineTestBase, test.TestCase):
                                          backend=components.persistence)
             components.board.post('poke', lb,
                                   details={'flow_uuid': fd.uuid})
-            consumed_event.wait(1.0)
-            self.assertTrue(consumed_event.is_set())
-            self.assertTrue(components.conductor.stop(1.0))
+            self.assertTrue(consumed_event.wait(test_utils.WAIT_TIMEOUT))
+            self.assertTrue(components.conductor.stop(test_utils.WAIT_TIMEOUT))
             self.assertFalse(components.conductor.dispatching)
 
         persistence = components.persistence
@@ -125,15 +117,14 @@ class SingleThreadedConductorTest(test_utils.EngineTestBase, test.TestCase):
     def test_fail_run(self):
         components = self.make_components()
         components.conductor.connect()
-
-        consumed_event = threading.Event()
+        consumed_event = threading_utils.Event()
 
         def on_consume(state, details):
             consumed_event.set()
 
-        components.board.notifier.register(jobboard.REMOVAL, on_consume)
+        components.board.notifier.register(base.REMOVAL, on_consume)
         with close_many(components.conductor, components.client):
-            t = make_thread(components.conductor)
+            t = threading_utils.daemon_thread(components.conductor.run)
             t.start()
             lb, fd = pu.temporary_flow_detail(components.persistence)
             engines.save_factory_details(fd, test_factory,
@@ -141,9 +132,8 @@ class SingleThreadedConductorTest(test_utils.EngineTestBase, test.TestCase):
                                          backend=components.persistence)
             components.board.post('poke', lb,
                                   details={'flow_uuid': fd.uuid})
-            consumed_event.wait(1.0)
-            self.assertTrue(consumed_event.is_set())
-            self.assertTrue(components.conductor.stop(1.0))
+            self.assertTrue(consumed_event.wait(test_utils.WAIT_TIMEOUT))
+            self.assertTrue(components.conductor.stop(test_utils.WAIT_TIMEOUT))
             self.assertFalse(components.conductor.dispatching)
 
         persistence = components.persistence

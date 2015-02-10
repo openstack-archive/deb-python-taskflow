@@ -38,7 +38,7 @@ How it is used
 
 On :doc:`engine <engines>` construction typically a backend (it can be
 optional) will be provided which satisfies the
-:py:class:`~taskflow.persistence.backends.base.Backend` abstraction. Along with
+:py:class:`~taskflow.persistence.base.Backend` abstraction. Along with
 providing a backend object a
 :py:class:`~taskflow.persistence.logbook.FlowDetail` object will also be
 created and provided (this object will contain the details about the flow to be
@@ -55,7 +55,7 @@ interface to the underlying backend storage objects (it provides helper
 functions that are commonly used by the engine, avoiding repeating code when
 interacting with the provided
 :py:class:`~taskflow.persistence.logbook.FlowDetail` and
-:py:class:`~taskflow.persistence.backends.base.Backend` objects). As an engine
+:py:class:`~taskflow.persistence.base.Backend` objects). As an engine
 initializes it will extract (or create)
 :py:class:`~taskflow.persistence.logbook.AtomDetail` objects for each atom in
 the workflow the engine will be executing.
@@ -72,7 +72,7 @@ predecessor :py:class:`~taskflow.persistence.logbook.AtomDetail` outputs and
 states (which may have been persisted in a past run). This will result in
 either using there previous information or by running those predecessors and
 saving their output to the :py:class:`~taskflow.persistence.logbook.FlowDetail`
-and :py:class:`~taskflow.persistence.backends.base.Backend` objects. This
+and :py:class:`~taskflow.persistence.base.Backend` objects. This
 execution, analysis and interaction with the storage objects continues (what is
 described here is a simplification of what really happens; which is quite a bit
 more complex) until the engine has finished running (at which point the engine
@@ -144,6 +144,9 @@ the following:
   ``'connection'`` and possibly type-specific backend parameters as other
   keys.
 
+Types
+=====
+
 Memory
 ------
 
@@ -151,6 +154,11 @@ Memory
 
 Retains all data in local memory (not persisted to reliable storage). Useful
 for scenarios where persistence is not required (and also in unit tests).
+
+.. note::
+
+    See :py:class:`~taskflow.persistence.backends.impl_memory.MemoryBackend`
+    for implementation details.
 
 Files
 -----
@@ -163,6 +171,11 @@ from the same local machine only). Useful for cases where a *more* reliable
 persistence is desired along with the simplicity of files and directories (a
 concept everyone is familiar with).
 
+.. note::
+
+    See :py:class:`~taskflow.persistence.backends.impl_dir.DirBackend`
+    for implementation details.
+
 Sqlalchemy
 ----------
 
@@ -174,8 +187,61 @@ Useful when you need a higher level of durability than offered by the previous
 solutions. When using these connection types it is possible to resume a engine
 from a peer machine (this does not apply when using sqlite).
 
+Schema
+^^^^^^
+
+*Logbooks*
+
+==========  ========  =============
+Name        Type      Primary Key
+==========  ========  =============
+created_at  DATETIME  False
+updated_at  DATETIME  False
+uuid        VARCHAR   True
+name        VARCHAR   False
+meta        TEXT      False
+==========  ========  =============
+
+*Flow details*
+
+===========  ========  =============
+Name         Type      Primary Key
+===========  ========  =============
+created_at   DATETIME  False
+updated_at   DATETIME  False
+uuid         VARCHAR   True
+name         VARCHAR   False
+meta         TEXT      False
+state        VARCHAR   False
+parent_uuid  VARCHAR   False
+===========  ========  =============
+
+*Atom details*
+
+===========  ========  =============
+Name         Type      Primary Key
+===========  ========  =============
+created_at   DATETIME  False
+updated_at   DATETIME  False
+uuid         VARCHAR   True
+name         VARCHAR   False
+meta         TEXT      False
+atom_type    VARCHAR   False
+state        VARCHAR   False
+intention    VARCHAR   False
+results      TEXT      False
+failure      TEXT      False
+version      TEXT      False
+parent_uuid  VARCHAR   False
+===========  ========  =============
+
 .. _sqlalchemy: http://www.sqlalchemy.org/docs/
 .. _ACID: https://en.wikipedia.org/wiki/ACID
+
+.. note::
+
+    See :py:class:`~taskflow.persistence.backends.impl_sqlalchemy.SQLAlchemyBackend`
+    for implementation details.
 
 Zookeeper
 ---------
@@ -190,6 +256,11 @@ logbook represented as znodes. Since zookeeper is also distributed it is also
 able to resume a engine from a peer machine (having similar functionality
 as the database connection types listed previously).
 
+.. note::
+
+    See :py:class:`~taskflow.persistence.backends.impl_zookeeper.ZkBackend`
+    for implementation details.
+
 .. _zookeeper: http://zookeeper.apache.org
 .. _kazoo: http://kazoo.readthedocs.org/
 
@@ -197,15 +268,24 @@ Interfaces
 ==========
 
 .. automodule:: taskflow.persistence.backends
-.. automodule:: taskflow.persistence.backends.base
+.. automodule:: taskflow.persistence.base
 .. automodule:: taskflow.persistence.logbook
+
+Implementations
+===============
+
+.. automodule:: taskflow.persistence.backends.impl_dir
+.. automodule:: taskflow.persistence.backends.impl_memory
+.. automodule:: taskflow.persistence.backends.impl_sqlalchemy
+.. automodule:: taskflow.persistence.backends.impl_zookeeper
 
 Hierarchy
 =========
 
 .. inheritance-diagram::
-    taskflow.persistence.backends.impl_memory
-    taskflow.persistence.backends.impl_zookeeper
+    taskflow.persistence.base
     taskflow.persistence.backends.impl_dir
+    taskflow.persistence.backends.impl_memory
     taskflow.persistence.backends.impl_sqlalchemy
+    taskflow.persistence.backends.impl_zookeeper
     :parts: 2

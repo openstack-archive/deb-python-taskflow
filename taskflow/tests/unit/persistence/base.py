@@ -16,16 +16,58 @@
 
 import contextlib
 
+from oslo_utils import uuidutils
+
 from taskflow import exceptions as exc
-from taskflow.openstack.common import uuidutils
 from taskflow.persistence import logbook
 from taskflow import states
-from taskflow.utils import misc
+from taskflow.types import failure
 
 
 class PersistenceTestMixin(object):
     def _get_connection(self):
-        raise NotImplementedError()
+        raise NotImplementedError('_get_connection() implementation required')
+
+    def test_task_detail_update_not_existing(self):
+        lb_id = uuidutils.generate_uuid()
+        lb_name = 'lb-%s' % (lb_id)
+        lb = logbook.LogBook(name=lb_name, uuid=lb_id)
+        fd = logbook.FlowDetail('test', uuid=uuidutils.generate_uuid())
+        lb.add(fd)
+        td = logbook.TaskDetail("detail-1", uuid=uuidutils.generate_uuid())
+        fd.add(td)
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.save_logbook(lb)
+
+        td2 = logbook.TaskDetail("detail-1", uuid=uuidutils.generate_uuid())
+        fd.add(td2)
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.update_flow_details(fd)
+
+        with contextlib.closing(self._get_connection()) as conn:
+            lb2 = conn.get_logbook(lb.uuid)
+        fd2 = lb2.find(fd.uuid)
+        self.assertIsNotNone(fd2.find(td.uuid))
+        self.assertIsNotNone(fd2.find(td2.uuid))
+
+    def test_flow_detail_update_not_existing(self):
+        lb_id = uuidutils.generate_uuid()
+        lb_name = 'lb-%s' % (lb_id)
+        lb = logbook.LogBook(name=lb_name, uuid=lb_id)
+        fd = logbook.FlowDetail('test', uuid=uuidutils.generate_uuid())
+        lb.add(fd)
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.save_logbook(lb)
+
+        fd2 = logbook.FlowDetail('test-2', uuid=uuidutils.generate_uuid())
+        lb.add(fd2)
+        with contextlib.closing(self._get_connection()) as conn:
+            conn.save_logbook(lb)
+
+        with contextlib.closing(self._get_connection()) as conn:
+            lb2 = conn.get_logbook(lb.uuid)
+        self.assertIsNotNone(lb2.find(fd.uuid))
+        self.assertIsNotNone(lb2.find(fd2.uuid))
 
     def test_logbook_save_retrieve(self):
         lb_id = uuidutils.generate_uuid()
@@ -147,7 +189,7 @@ class PersistenceTestMixin(object):
         try:
             raise RuntimeError('Woot!')
         except Exception:
-            td.failure = misc.Failure()
+            td.failure = failure.Failure()
 
         fd.add(td)
 
@@ -161,10 +203,9 @@ class PersistenceTestMixin(object):
             lb2 = conn.get_logbook(lb_id)
         fd2 = lb2.find(fd.uuid)
         td2 = fd2.find(td.uuid)
-        failure = td2.failure
-        self.assertEqual(failure.exception_str, 'Woot!')
-        self.assertIs(failure.check(RuntimeError), RuntimeError)
-        self.assertEqual(failure.traceback_str, td.failure.traceback_str)
+        self.assertEqual(td2.failure.exception_str, 'Woot!')
+        self.assertIs(td2.failure.check(RuntimeError), RuntimeError)
+        self.assertEqual(td2.failure.traceback_str, td.failure.traceback_str)
         self.assertIsInstance(td2, logbook.TaskDetail)
 
     def test_logbook_merge_flow_detail(self):
@@ -269,7 +310,7 @@ class PersistenceTestMixin(object):
         fd = logbook.FlowDetail('test', uuid=uuidutils.generate_uuid())
         lb.add(fd)
         rd = logbook.RetryDetail("retry-1", uuid=uuidutils.generate_uuid())
-        fail = misc.Failure.from_exception(RuntimeError('fail'))
+        fail = failure.Failure.from_exception(RuntimeError('fail'))
         rd.results.append((42, {'some-task': fail}))
         fd.add(rd)
 
@@ -286,7 +327,7 @@ class PersistenceTestMixin(object):
         rd2 = fd2.find(rd.uuid)
         self.assertIsInstance(rd2, logbook.RetryDetail)
         fail2 = rd2.results[0][1].get('some-task')
-        self.assertIsInstance(fail2, misc.Failure)
+        self.assertIsInstance(fail2, failure.Failure)
         self.assertTrue(fail.matches(fail2))
 
     def test_retry_detail_save_intention(self):

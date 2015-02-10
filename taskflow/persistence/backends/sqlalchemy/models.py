@@ -15,6 +15,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_serialization import jsonutils
+from oslo_utils import timeutils
+from oslo_utils import uuidutils
 from sqlalchemy import Column, String, DateTime, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import ForeignKey
@@ -22,9 +25,6 @@ from sqlalchemy.orm import backref
 from sqlalchemy.orm import relationship
 from sqlalchemy import types as types
 
-from taskflow.openstack.common import jsonutils
-from taskflow.openstack.common import timeutils
-from taskflow.openstack.common import uuidutils
 from taskflow.persistence import logbook
 from taskflow import states
 

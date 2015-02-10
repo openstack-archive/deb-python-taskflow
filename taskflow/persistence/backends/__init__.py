@@ -15,11 +15,11 @@
 #    under the License.
 
 import contextlib
-import logging
 
 from stevedore import driver
 
 from taskflow import exceptions as exc
+from taskflow import logging
 from taskflow.utils import misc
 
 
@@ -52,12 +52,17 @@ def fetch(conf, namespace=BACKEND_NAMESPACE, **kwargs):
     """
     backend_name = conf['connection']
     try:
-        pieces = misc.parse_uri(backend_name)
+        uri = misc.parse_uri(backend_name)
     except (TypeError, ValueError):
         pass
     else:
-        backend_name = pieces['scheme']
-        conf = misc.merge_uri(pieces, conf.copy())
+        backend_name = uri.scheme
+        conf = misc.merge_uri(uri, conf.copy())
+    # If the backend is like 'mysql+pymysql://...' which informs the
+    # backend to use a dialect (supported by sqlalchemy at least) we just want
+    # to look at the first component to find our entrypoint backend name...
+    if backend_name.find("+") != -1:
+        backend_name = backend_name.split("+", 1)[0]
     LOG.debug('Looking for %r backend driver in %r', backend_name, namespace)
     try:
         mgr = driver.DriverManager(namespace, backend_name,

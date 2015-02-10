@@ -19,29 +19,57 @@ import abc
 
 import six
 
+from taskflow.types import notifier
+from taskflow.utils import deprecation
 from taskflow.utils import misc
 
 
 @six.add_metaclass(abc.ABCMeta)
-class EngineBase(object):
+class Engine(object):
     """Base for all engines implementations.
 
     :ivar notifier: A notification object that will dispatch events that
                     occur related to the flow the engine contains.
     :ivar task_notifier: A notification object that will dispatch events that
                          occur related to the tasks the engine contains.
+                         occur related to the tasks the engine
+                         contains (deprecated).
+    :ivar atom_notifier: A notification object that will dispatch events that
+                         occur related to the atoms the engine contains.
     """
 
-    def __init__(self, flow, flow_detail, backend, conf):
+    def __init__(self, flow, flow_detail, backend, options):
         self._flow = flow
         self._flow_detail = flow_detail
         self._backend = backend
-        if not conf:
-            self._conf = {}
+        if not options:
+            self._options = {}
         else:
-            self._conf = dict(conf)
-        self.notifier = misc.Notifier()
-        self.task_notifier = misc.Notifier()
+            self._options = dict(options)
+        self._notifier = notifier.Notifier()
+        self._atom_notifier = notifier.Notifier()
+
+    @property
+    def notifier(self):
+        """The flow notifier."""
+        return self._notifier
+
+    @property
+    @deprecation.moved_property('atom_notifier', version="0.6",
+                                removal_version="?")
+    def task_notifier(self):
+        """The task notifier."""
+        return self._atom_notifier
+
+    @property
+    def atom_notifier(self):
+        """The atom notifier."""
+        return self._atom_notifier
+
+    @property
+    def options(self):
+        """The options that were passed to this engine on construction."""
+        return self._options
 
     @misc.cachedproperty
     def storage(self):
@@ -85,3 +113,10 @@ class EngineBase(object):
         not currently be preempted) and move the engine into a suspend state
         which can then later be resumed from.
         """
+
+
+# TODO(harlowja): remove in 0.7 or later...
+EngineBase = deprecation.moved_inheritable_class(Engine,
+                                                 'EngineBase', __name__,
+                                                 version="0.6",
+                                                 removal_version="?")

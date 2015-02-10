@@ -16,13 +16,14 @@
 
 from taskflow.engines.action_engine import engine
 from taskflow.engines.worker_based import executor
+from taskflow.engines.worker_based import protocol as pr
 from taskflow import storage as t_storage
 
 
 class WorkerBasedActionEngine(engine.ActionEngine):
     """Worker based action engine.
 
-    Specific backend configuration:
+    Specific backend options (extracted from provided engine options):
 
     :param exchange: broker exchange exchange name in which executor / worker
                      communication is performed
@@ -30,24 +31,48 @@ class WorkerBasedActionEngine(engine.ActionEngine):
     :param topics: list of workers topics to communicate with (this will also
                    be learned by listening to the notifications that workers
                    emit).
-    :keyword transport: transport to be used (e.g. amqp, memory, etc.)
-    :keyword transport_options: transport specific options
+    :param transport: transport to be used (e.g. amqp, memory, etc.)
+    :param transition_timeout: numeric value (or None for infinite) to wait
+                               for submitted remote requests to transition out
+                               of the (PENDING, WAITING) request states. When
+                               expired the associated task the request was made
+                               for will have its result become a
+                               `RequestTimeout` exception instead of its
+                               normally returned value (or raised exception).
+    :param transport_options: transport specific options (see:
+                              http://kombu.readthedocs.org/ for what these
+                              options imply and are expected to be)
+    :param retry_options: retry specific options
+                          (see: :py:attr:`~.proxy.Proxy.DEFAULT_RETRY_OPTIONS`)
     """
 
     _storage_factory = t_storage.SingleThreadedStorage
 
-    def _task_executor_factory(self):
-        if self._executor is not None:
-            return self._executor
-        return executor.WorkerTaskExecutor(
-            uuid=self._flow_detail.uuid,
-            url=self._conf.get('url'),
-            exchange=self._conf.get('exchange', 'default'),
-            topics=self._conf.get('topics', []),
-            transport=self._conf.get('transport'),
-            transport_options=self._conf.get('transport_options'))
+    def __init__(self, flow, flow_detail, backend, options):
+        super(WorkerBasedActionEngine, self).__init__(flow, flow_detail,
+                                                      backend, options)
+        # This ensures that any provided executor will be validated before
+        # we get to far in the compilation/execution pipeline...
+        self._task_executor = self._fetch_task_executor(self._options,
+                                                        self._flow_detail)
 
-    def __init__(self, flow, flow_detail, backend, conf, **kwargs):
-        super(WorkerBasedActionEngine, self).__init__(
-            flow, flow_detail, backend, conf)
-        self._executor = kwargs.get('executor')
+    @classmethod
+    def _fetch_task_executor(cls, options, flow_detail):
+        try:
+            e = options['executor']
+            if not isinstance(e, executor.WorkerTaskExecutor):
+                raise TypeError("Expected an instance of type '%s' instead of"
+                                " type '%s' for 'executor' option"
+                                % (executor.WorkerTaskExecutor, type(e)))
+            return e
+        except KeyError:
+            return executor.WorkerTaskExecutor(
+                uuid=flow_detail.uuid,
+                url=options.get('url'),
+                exchange=options.get('exchange', 'default'),
+                retry_options=options.get('retry_options'),
+                topics=options.get('topics', []),
+                transport=options.get('transport'),
+                transport_options=options.get('transport_options'),
+                transition_timeout=options.get('transition_timeout',
+                                               pr.REQUEST_TIMEOUT))

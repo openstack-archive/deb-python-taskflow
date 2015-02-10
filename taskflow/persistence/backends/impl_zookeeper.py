@@ -15,14 +15,14 @@
 #    under the License.
 
 import contextlib
-import logging
 
 from kazoo import exceptions as k_exc
 from kazoo.protocol import paths
+from oslo_serialization import jsonutils
 
 from taskflow import exceptions as exc
-from taskflow.openstack.common import jsonutils
-from taskflow.persistence.backends import base
+from taskflow import logging
+from taskflow.persistence import base
 from taskflow.persistence import logbook
 from taskflow.utils import kazoo_utils as k_utils
 from taskflow.utils import misc
@@ -43,12 +43,12 @@ class ZkBackend(base.Backend):
     inside those directories that represent the contents of those objects for
     later reading and writing.
 
-    Example conf:
+    Example configuration::
 
-    conf = {
-        "hosts": "192.168.0.1:2181,192.168.0.2:2181,192.168.0.3:2181",
-        "path": "/taskflow",
-    }
+        conf = {
+            "hosts": "192.168.0.1:2181,192.168.0.2:2181,192.168.0.3:2181",
+            "path": "/taskflow",
+        }
     """
     def __init__(self, conf, client=None):
         super(ZkBackend, self).__init__(conf)
@@ -169,7 +169,11 @@ class ZkConnection(base.Connection):
             ad_data, _zstat = self._client.get(ad_path)
         except k_exc.NoNodeError:
             # Not-existent: create or raise exception.
-            raise exc.NotFound("No atom details found with id: %s" % ad.uuid)
+            if not create_missing:
+                raise exc.NotFound("No atom details found with"
+                                   " id: %s" % ad.uuid)
+            else:
+                txn.create(ad_path)
         else:
             # Existent: read it out.
             try:

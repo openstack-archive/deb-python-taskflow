@@ -17,21 +17,20 @@
 import collections
 import contextlib
 import functools
-import logging
 import threading
 
 from concurrent import futures
 from kazoo import exceptions as k_exceptions
 from kazoo.protocol import paths as k_paths
 from kazoo.recipe import watchers
+from oslo_serialization import jsonutils
+from oslo_utils import excutils
+from oslo_utils import uuidutils
 import six
 
 from taskflow import exceptions as excp
-from taskflow.jobs import job as base_job
-from taskflow.jobs import jobboard
-from taskflow.openstack.common import excutils
-from taskflow.openstack.common import jsonutils
-from taskflow.openstack.common import uuidutils
+from taskflow.jobs import base
+from taskflow import logging
 from taskflow import states
 from taskflow.types import timing as tt
 from taskflow.utils import kazoo_utils
@@ -62,7 +61,9 @@ def _check_who(who):
         raise ValueError("Job applicant must be non-empty")
 
 
-class ZookeeperJob(base_job.Job):
+class ZookeeperJob(base.Job):
+    """A zookeeper job."""
+
     def __init__(self, name, board, client, backend, path,
                  uuid=None, details=None, book=None, book_data=None,
                  created_on=None):
@@ -77,10 +78,13 @@ class ZookeeperJob(base_job.Job):
         if all((self._book, self._book_data)):
             raise ValueError("Only one of 'book_data' or 'book'"
                              " can be provided")
-        self._path = path
+        self._path = k_paths.normpath(path)
         self._lock_path = path + LOCK_POSTFIX
         self._created_on = created_on
         self._node_not_found = False
+        basename = k_paths.basename(self._path)
+        self._root = self._path[0:-len(basename)]
+        self._sequence = int(basename[len(JOB_PREFIX):])
 
     @property
     def lock_path(self):
@@ -89,6 +93,16 @@ class ZookeeperJob(base_job.Job):
     @property
     def path(self):
         return self._path
+
+    @property
+    def sequence(self):
+        """Sequence number of the current job."""
+        return self._sequence
+
+    @property
+    def root(self):
+        """The parent path of the job in zookeeper."""
+        return self._root
 
     def _get_node_attr(self, path, attr_name, trans_func=None):
         try:
@@ -104,7 +118,7 @@ class ZookeeperJob(base_job.Job):
                                 % (attr_name, self.uuid, self.path, path), e)
         except self._client.handler.timeout_exception as e:
             raise excp.JobFailure("Can not fetch the %r attribute"
-                                  " of job %s (%s), connection timed out"
+                                  " of job %s (%s), operation timed out"
                                   % (attr_name, self.uuid, self.path), e)
         except k_exceptions.SessionExpiredError as e:
             raise excp.JobFailure("Can not fetch the %r attribute"
@@ -172,7 +186,7 @@ class ZookeeperJob(base_job.Job):
                                   " session expired" % (self.uuid), e)
         except self._client.handler.timeout_exception as e:
             raise excp.JobFailure("Can not fetch the state of %s,"
-                                  " connection timed out" % (self.uuid), e)
+                                  " operation timed out" % (self.uuid), e)
         except k_exceptions.KazooException as e:
             raise excp.JobFailure("Can not fetch the state of %s, internal"
                                   " error" % (self.uuid), e)
@@ -186,8 +200,11 @@ class ZookeeperJob(base_job.Job):
             return states.UNCLAIMED
         return states.CLAIMED
 
-    def __cmp__(self, other):
-        return cmp(self.path, other.path)
+    def __lt__(self, other):
+        if self.root == other.root:
+            return self.sequence < other.sequence
+        else:
+            return self.root < other.root
 
     def __hash__(self):
         return hash(self.path)
@@ -218,14 +235,14 @@ class ZookeeperJob(base_job.Job):
 
 
 class ZookeeperJobBoardIterator(six.Iterator):
-    """Iterator over a zookeeper jobboard.
+    """Iterator over a zookeeper jobboard that iterates over potential jobs.
 
     It supports the following attributes/constructor arguments:
 
-    * ensure_fresh: boolean that requests that during every fetch of a new
+    * ``ensure_fresh``: boolean that requests that during every fetch of a new
       set of jobs this will cause the iterator to force the backend to
       refresh (ensuring that the jobboard has the most recent job listings).
-    * only_unclaimed: boolean that indicates whether to only iterate
+    * ``only_unclaimed``: boolean that indicates whether to only iterate
       over unclaimed jobs.
     """
 
@@ -274,7 +291,30 @@ class ZookeeperJobBoardIterator(six.Iterator):
             return job
 
 
-class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
+class ZookeeperJobBoard(base.NotifyingJobBoard):
+    """A jobboard backend by zookeeper.
+
+    Powered by the `kazoo <http://kazoo.readthedocs.org/>`_ library.
+
+    This jobboard creates *sequenced* persistent znodes in a directory in
+    zookeeper (that directory defaults ``/taskflow/jobs``) and uses zookeeper
+    watches to notify other jobboards that the job which was posted using the
+    :meth:`.post` method (this creates a znode with contents/details in json)
+    The users of those jobboard(s) (potentially on disjoint sets of machines)
+    can then iterate over the available jobs and decide if they want to attempt
+    to claim one of the jobs they have iterated over. If so they will then
+    attempt to contact zookeeper and will attempt to create a ephemeral znode
+    using the name of the persistent znode + ".lock" as a postfix. If the
+    entity trying to use the jobboard to :meth:`.claim` the job is able to
+    create a ephemeral znode with that name then it will be allowed (and
+    expected) to perform whatever *work* the contents of that job that it
+    locked described. Once finished the ephemeral znode and persistent znode
+    may be deleted (if successfully completed) in a single transcation or if
+    not successfull (or the entity that claimed the znode dies) the ephemeral
+    znode will be released (either manually by using :meth:`.abandon` or
+    automatically by zookeeper the ephemeral is deemed to be lost).
+    """
+
     def __init__(self, name, conf,
                  client=None, persistence=None, emit_notifications=True):
         super(ZookeeperJobBoard, self).__init__(name, conf)
@@ -298,8 +338,7 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
         self._persistence = persistence
         # Misc. internal details
         self._known_jobs = {}
-        self._job_lock = threading.RLock()
-        self._job_cond = threading.Condition(self._job_lock)
+        self._job_cond = threading.Condition()
         self._open_close_lock = threading.RLock()
         self._client.add_listener(self._state_change_listener)
         self._bad_paths = frozenset([path])
@@ -312,8 +351,12 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
 
     def _emit(self, state, details):
         # Submit the work to the executor to avoid blocking the kazoo queue.
-        if self._worker is not None:
+        try:
             self._worker.submit(self.notifier.notify, state, details)
+        except (AttributeError, RuntimeError):
+            # Notification thread is shutdown or non-existent, either case we
+            # just want to skip submitting a notification...
+            pass
 
     @property
     def path(self):
@@ -321,20 +364,19 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
 
     @property
     def job_count(self):
-        with self._job_lock:
-            return len(self._known_jobs)
+        return len(self._known_jobs)
 
     def _fetch_jobs(self, ensure_fresh=False):
         if ensure_fresh:
             self._force_refresh()
-        with self._job_lock:
+        with self._job_cond:
             return sorted(six.itervalues(self._known_jobs))
 
     def _force_refresh(self):
         try:
             children = self._client.get_children(self.path)
         except self._client.handler.timeout_exception as e:
-            raise excp.JobFailure("Refreshing failure, connection timed out",
+            raise excp.JobFailure("Refreshing failure, operation timed out",
                                   e)
         except k_exceptions.SessionExpiredError as e:
             raise excp.JobFailure("Refreshing failure, session expired", e)
@@ -351,11 +393,13 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
                                          ensure_fresh=ensure_fresh)
 
     def _remove_job(self, path):
-        LOG.debug("Removing job that was at path: %s", path)
-        with self._job_lock:
+        if path not in self._known_jobs:
+            return
+        with self._job_cond:
             job = self._known_jobs.pop(path, None)
         if job is not None:
-            self._emit(jobboard.REMOVAL, details={'job': job})
+            LOG.debug("Removed job that was at path '%s'", path)
+            self._emit(base.REMOVAL, details={'job': job})
 
     def _process_child(self, path, request):
         """Receives the result of a child data fetch request."""
@@ -368,7 +412,7 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
             LOG.warn("Incorrectly formatted job data found at path: %s",
                      path, exc_info=True)
         except self._client.handler.timeout_exception:
-            LOG.warn("Connection timed out fetching job data from path: %s",
+            LOG.warn("Operation timed out fetching job data from path: %s",
                      path, exc_info=True)
         except k_exceptions.SessionExpiredError:
             LOG.warn("Session expired fetching job data from path: %s", path,
@@ -380,8 +424,10 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
             LOG.warn("Internal error fetching job data from path: %s",
                      path, exc_info=True)
         else:
-            self._job_cond.acquire()
-            try:
+            with self._job_cond:
+                # Now we can offically check if someone already placed this
+                # jobs information into the known job set (if it's already
+                # existing then just leave it alone).
                 if path not in self._known_jobs:
                     job = ZookeeperJob(job_data['name'], self,
                                        self._client, self._persistence, path,
@@ -391,10 +437,8 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
                                        created_on=created_on)
                     self._known_jobs[path] = job
                     self._job_cond.notify_all()
-            finally:
-                self._job_cond.release()
         if job is not None:
-            self._emit(jobboard.POSTED, details={'job': job})
+            self._emit(base.POSTED, details={'job': job})
 
     def _on_job_posting(self, children, delayed=True):
         LOG.debug("Got children %s under path %s", children, self.path)
@@ -405,32 +449,43 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
                 continue
             child_paths.append(k_paths.join(self.path, c))
 
-        # Remove jobs that we know about but which are no longer children
-        with self._job_lock:
-            removals = set()
-            for path, _job in six.iteritems(self._known_jobs):
+        # Figure out what we really should be investigating and what we
+        # shouldn't (remove jobs that exist in our local version, but don't
+        # exist in the children anymore) and accumulate all paths that we
+        # need to trigger population of (without holding the job lock).
+        investigate_paths = []
+        pending_removals = []
+        with self._job_cond:
+            for path in six.iterkeys(self._known_jobs):
                 if path not in child_paths:
-                    removals.add(path)
-            for path in removals:
-                self._remove_job(path)
-
-        # Ensure that we have a job record for each new job that has appeared
+                    pending_removals.append(path)
         for path in child_paths:
             if path in self._bad_paths:
                 continue
-            with self._job_lock:
-                if path not in self._known_jobs:
-                    # Fire off the request to populate this job asynchronously.
-                    #
-                    # This method is *usually* called from a asynchronous
-                    # handler so it's better to exit from this quickly to
-                    # allow other asynchronous handlers to be executed.
-                    request = self._client.get_async(path)
-                    child_proc = functools.partial(self._process_child, path)
-                    if delayed:
-                        request.rawlink(child_proc)
-                    else:
-                        child_proc(request)
+            # This pre-check will *not* guarantee that we will not already
+            # have the job (if it's being populated elsewhere) but it will
+            # reduce the amount of duplicated requests in general; later when
+            # the job information has been populated we will ensure that we
+            # are not adding duplicates into the currently known jobs...
+            if path in self._known_jobs:
+                continue
+            if path not in investigate_paths:
+                investigate_paths.append(path)
+        if pending_removals:
+            with self._job_cond:
+                for path in pending_removals:
+                    self._remove_job(path)
+        for path in investigate_paths:
+            # Fire off the request to populate this job.
+            #
+            # This method is *usually* called from a asynchronous handler so
+            # it's better to exit from this quickly to allow other asynchronous
+            # handlers to be executed.
+            request = self._client.get_async(path)
+            if delayed:
+                request.rawlink(functools.partial(self._process_child, path))
+            else:
+                self._process_child(path, request)
 
     def post(self, name, book=None, details=None):
 
@@ -466,13 +521,10 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
                                self._persistence, job_path,
                                book=book, details=details,
                                uuid=job_uuid)
-            self._job_cond.acquire()
-            try:
+            with self._job_cond:
                 self._known_jobs[job_path] = job
                 self._job_cond.notify_all()
-            finally:
-                self._job_cond.release()
-            self._emit(jobboard.POSTED, details={'job': job})
+            self._emit(base.POSTED, details={'job': job})
             return job
 
     def claim(self, job, who):
@@ -531,14 +583,13 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
             if not job_path:
                 raise ValueError("Unable to check if %r is a known path"
                                  % (job_path))
-            with self._job_lock:
-                if job_path not in self._known_jobs:
-                    fail_msg_tpl += ", unknown job"
-                    raise excp.NotFound(fail_msg_tpl % (job_uuid))
+            if job_path not in self._known_jobs:
+                fail_msg_tpl += ", unknown job"
+                raise excp.NotFound(fail_msg_tpl % (job_uuid))
         try:
             yield
         except self._client.handler.timeout_exception as e:
-            fail_msg_tpl += ", connection timed out"
+            fail_msg_tpl += ", operation timed out"
             raise excp.JobFailure(fail_msg_tpl % (job_uuid), e)
         except k_exceptions.SessionExpiredError as e:
             fail_msg_tpl += ", session expired"
@@ -610,14 +661,12 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
 
     def wait(self, timeout=None):
         # Wait until timeout expires (or forever) for jobs to appear.
-        watch = None
-        if timeout is not None:
-            watch = tt.StopWatch(duration=float(timeout)).start()
-        self._job_cond.acquire()
-        try:
+        watch = tt.StopWatch(duration=timeout)
+        watch.start()
+        with self._job_cond:
             while True:
                 if not self._known_jobs:
-                    if watch is not None and watch.expired():
+                    if watch.expired():
                         raise excp.NotFound("Expired waiting for jobs to"
                                             " arrive; waited %s seconds"
                                             % watch.elapsed())
@@ -626,17 +675,12 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
                     # when we acquire the condition that there will actually
                     # be jobs (especially if we are spuriously awaken), so we
                     # must recalculate the amount of time we really have left.
-                    timeout = None
-                    if watch is not None:
-                        timeout = watch.leftover()
-                    self._job_cond.wait(timeout)
+                    self._job_cond.wait(watch.leftover(return_none=True))
                 else:
                     it = ZookeeperJobBoardIterator(self)
                     it._jobs.extend(self._fetch_jobs())
                     it._fetched = True
                     return it
-        finally:
-            self._job_cond.release()
 
     @property
     def connected(self):
@@ -651,7 +695,7 @@ class ZookeeperJobBoard(jobboard.NotifyingJobBoard):
             LOG.debug("Shutting down the notifier")
             self._worker.shutdown()
             self._worker = None
-        with self._job_lock:
+        with self._job_cond:
             self._known_jobs.clear()
         LOG.debug("Stopped & cleared local state")
 

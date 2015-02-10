@@ -16,11 +16,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
+
 import six
 
 
 class FrozenNode(Exception):
     """Exception raised when a frozen node is modified."""
+
+    def __init__(self):
+        super(FrozenNode, self).__init__("Frozen node(s) can't be modified")
 
 
 class _DFSIter(object):
@@ -42,8 +47,7 @@ class _DFSIter(object):
             # Visit the node.
             yield node
             # Traverse the left & right subtree.
-            for child_node in reversed(list(node)):
-                stack.append(child_node)
+            stack.extend(node.reverse_iter())
 
 
 class Node(object):
@@ -53,20 +57,22 @@ class Node(object):
         self.item = item
         self.parent = None
         self.metadata = dict(kwargs)
+        self.frozen = False
         self._children = []
-        self._frozen = False
-
-    def _frozen_add(self, child):
-        raise FrozenNode("Frozen node(s) can't be modified")
 
     def freeze(self):
-        if not self._frozen:
+        if not self.frozen:
+            # This will DFS until all children are frozen as well, only
+            # after that works do we freeze ourselves (this makes it so
+            # that we don't become frozen if a child node fails to perform
+            # the freeze operation).
             for n in self:
                 n.freeze()
-            self.add = self._frozen_add
-            self._frozen = True
+            self.frozen = True
 
     def add(self, child):
+        if self.frozen:
+            raise FrozenNode()
         child.parent = self
         self._children.append(child)
 
@@ -107,21 +113,22 @@ class Node(object):
     def pformat(self):
         """Recursively formats a node into a nice string representation.
 
-        Example Input:
-         yahoo = tt.Node("CEO")
-         yahoo.add(tt.Node("Infra"))
-         yahoo[0].add(tt.Node("Boss"))
-         yahoo[0][0].add(tt.Node("Me"))
-         yahoo.add(tt.Node("Mobile"))
-         yahoo.add(tt.Node("Mail"))
+        **Example**::
 
-        Example Output:
-         CEO
-         |__Infra
-         |  |__Boss
-         |     |__Me
-         |__Mobile
-         |__Mail
+            >>> from taskflow.types import tree
+            >>> yahoo = tree.Node("CEO")
+            >>> yahoo.add(tree.Node("Infra"))
+            >>> yahoo[0].add(tree.Node("Boss"))
+            >>> yahoo[0][0].add(tree.Node("Me"))
+            >>> yahoo.add(tree.Node("Mobile"))
+            >>> yahoo.add(tree.Node("Mail"))
+            >>> print(yahoo.pformat())
+            CEO
+            |__Infra
+            |  |__Boss
+            |     |__Me
+            |__Mobile
+            |__Mail
         """
         def _inner_pformat(node, level):
             if level == 0:
@@ -130,10 +137,10 @@ class Node(object):
             else:
                 yield "__%s" % six.text_type(node.item)
                 prefix = " " * 2
-            children = list(node)
-            for (i, child) in enumerate(children):
+            child_count = node.child_count()
+            for (i, child) in enumerate(node):
                 for (j, text) in enumerate(_inner_pformat(child, level + 1)):
-                    if j == 0 or i + 1 < len(children):
+                    if j == 0 or i + 1 < child_count:
                         text = prefix + "|" + text
                     else:
                         text = prefix + " " + text
@@ -143,7 +150,7 @@ class Node(object):
         for i, line in enumerate(_inner_pformat(self, 0)):
             accumulator.write(line)
             if i < expected_lines:
-                accumulator.write('\n')
+                accumulator.write(os.linesep)
         return accumulator.getvalue()
 
     def child_count(self, only_direct=True):
@@ -166,8 +173,13 @@ class Node(object):
         for c in self._children:
             yield c
 
+    def reverse_iter(self):
+        """Iterates over the direct children of this node (left->right)."""
+        for c in reversed(self._children):
+            yield c
+
     def index(self, item):
-        """Finds the child index of a given item, searchs in added order."""
+        """Finds the child index of a given item, searches in added order."""
         index_at = None
         for (i, child) in enumerate(self._children):
             if child.item == item:

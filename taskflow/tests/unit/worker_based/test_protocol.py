@@ -15,14 +15,15 @@
 #    under the License.
 
 from concurrent import futures
-import mock
+from oslo_utils import uuidutils
 
+from taskflow.engines.action_engine import executor
 from taskflow.engines.worker_based import protocol as pr
 from taskflow import exceptions as excp
-from taskflow.openstack.common import uuidutils
 from taskflow import test
 from taskflow.tests import utils
-from taskflow.utils import misc
+from taskflow.types import failure
+from taskflow.types import timing
 
 
 class TestProtocolValidation(test.TestCase):
@@ -51,7 +52,7 @@ class TestProtocolValidation(test.TestCase):
 
     def test_request(self):
         msg = pr.Request(utils.DummyTask("hi"), uuidutils.generate_uuid(),
-                         pr.EXECUTE, {}, None, 1.0)
+                         pr.EXECUTE, {}, 1.0)
         pr.Request.validate(msg.to_dict())
 
     def test_request_invalid(self):
@@ -64,13 +65,14 @@ class TestProtocolValidation(test.TestCase):
 
     def test_request_invalid_action(self):
         msg = pr.Request(utils.DummyTask("hi"), uuidutils.generate_uuid(),
-                         pr.EXECUTE, {}, None, 1.0)
+                         pr.EXECUTE, {}, 1.0)
         msg = msg.to_dict()
         msg['action'] = 'NOTHING'
         self.assertRaises(excp.InvalidFormat, pr.Request.validate, msg)
 
     def test_response_progress(self):
-        msg = pr.Response(pr.PROGRESS, progress=0.5, event_data={})
+        msg = pr.Response(pr.EVENT, details={'progress': 0.5},
+                          event_type='blah')
         pr.Response.validate(msg.to_dict())
 
     def test_response_completion(self):
@@ -78,7 +80,9 @@ class TestProtocolValidation(test.TestCase):
         pr.Response.validate(msg.to_dict())
 
     def test_response_mixed_invalid(self):
-        msg = pr.Response(pr.PROGRESS, progress=0.5, event_data={}, result=1)
+        msg = pr.Response(pr.EVENT,
+                          details={'progress': 0.5},
+                          event_type='blah', result=1)
         self.assertRaises(excp.InvalidFormat, pr.Response.validate, msg)
 
     def test_response_bad_state(self):
@@ -90,6 +94,8 @@ class TestProtocol(test.TestCase):
 
     def setUp(self):
         super(TestProtocol, self).setUp()
+        timing.StopWatch.set_now_override()
+        self.addCleanup(timing.StopWatch.clear_overrides)
         self.task = utils.DummyTask()
         self.task_uuid = 'task-uuid'
         self.task_action = 'execute'
@@ -130,7 +136,7 @@ class TestProtocol(test.TestCase):
     def test_creation(self):
         request = self.request()
         self.assertEqual(request.uuid, self.task_uuid)
-        self.assertEqual(request.task_cls, self.task.name)
+        self.assertEqual(request.task, self.task)
         self.assertIsInstance(request.result, futures.Future)
         self.assertFalse(request.result.done())
 
@@ -146,50 +152,37 @@ class TestProtocol(test.TestCase):
                          self.request_to_dict(result=('success', None)))
 
     def test_to_dict_with_result_failure(self):
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
-        expected = self.request_to_dict(result=('failure', failure.to_dict()))
-        self.assertEqual(self.request(result=failure).to_dict(), expected)
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
+        expected = self.request_to_dict(result=('failure',
+                                                a_failure.to_dict()))
+        self.assertEqual(self.request(result=a_failure).to_dict(), expected)
 
     def test_to_dict_with_failures(self):
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
-        request = self.request(failures={self.task.name: failure})
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
+        request = self.request(failures={self.task.name: a_failure})
         expected = self.request_to_dict(
-            failures={self.task.name: failure.to_dict()})
+            failures={self.task.name: a_failure.to_dict()})
         self.assertEqual(request.to_dict(), expected)
 
-    @mock.patch('taskflow.engines.worker_based.protocol.misc.wallclock')
-    def test_pending_not_expired(self, mocked_wallclock):
-        mocked_wallclock.side_effect = [0, self.timeout - 1]
-        self.assertFalse(self.request().expired)
+    def test_pending_not_expired(self):
+        req = self.request()
+        timing.StopWatch.set_offset_override(self.timeout - 1)
+        self.assertFalse(req.expired)
 
-    @mock.patch('taskflow.engines.worker_based.protocol.misc.wallclock')
-    def test_pending_expired(self, mocked_wallclock):
-        mocked_wallclock.side_effect = [0, self.timeout + 2]
-        self.assertTrue(self.request().expired)
+    def test_pending_expired(self):
+        req = self.request()
+        timing.StopWatch.set_offset_override(self.timeout + 1)
+        self.assertTrue(req.expired)
 
-    @mock.patch('taskflow.engines.worker_based.protocol.misc.wallclock')
-    def test_running_not_expired(self, mocked_wallclock):
-        mocked_wallclock.side_effect = [0, self.timeout + 2]
+    def test_running_not_expired(self):
         request = self.request()
         request.transition(pr.PENDING)
         request.transition(pr.RUNNING)
+        timing.StopWatch.set_offset_override(self.timeout + 1)
         self.assertFalse(request.expired)
 
     def test_set_result(self):
         request = self.request()
         request.set_result(111)
         result = request.result.result()
-        self.assertEqual(result, (self.task, 'executed', 111))
-
-    def test_on_progress(self):
-        progress_callback = mock.MagicMock(name='progress_callback')
-        request = self.request(task=self.task,
-                               progress_callback=progress_callback)
-        request.on_progress('event_data', 0.0)
-        request.on_progress('event_data', 1.0)
-
-        expected_calls = [
-            mock.call(self.task, 'event_data', 0.0),
-            mock.call(self.task, 'event_data', 1.0)
-        ]
-        self.assertEqual(progress_callback.mock_calls, expected_calls)
+        self.assertEqual(result, (executor.EXECUTED, 111))

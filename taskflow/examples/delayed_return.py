@@ -39,14 +39,14 @@ from taskflow.listeners import base
 from taskflow.patterns import linear_flow as lf
 from taskflow import states
 from taskflow import task
-from taskflow.utils import misc
+from taskflow.types import notifier
 
 
 class PokeFutureListener(base.ListenerBase):
     def __init__(self, engine, future, task_name):
         super(PokeFutureListener, self).__init__(
             engine,
-            task_listen_for=(misc.Notifier.ANY,),
+            task_listen_for=(notifier.Notifier.ANY,),
             flow_listen_for=[])
         self._future = future
         self._task_name = task_name
@@ -74,7 +74,7 @@ class Bye(task.Task):
 
 def return_from_flow(pool):
     wf = lf.Flow("root").add(Hi("hi"), Bye("bye"))
-    eng = taskflow.engines.load(wf, engine_conf='serial')
+    eng = taskflow.engines.load(wf, engine='serial')
     f = futures.Future()
     watcher = PokeFutureListener(eng, f, 'hi')
     watcher.register()

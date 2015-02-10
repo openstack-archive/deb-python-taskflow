@@ -14,9 +14,29 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from __future__ import absolute_import
+
+import collections
+import logging
+
 import fixtures
-import mock
+from oslotest import base
+from oslotest import mockpatch
 import six
+
+# This is weird like this since we want to import a mock that works the best
+# and we need to try this import order, since oslotest registers a six.moves
+# module (but depending on the import order of importing oslotest we may or
+# may not see that change when trying to use it from six).
+try:
+    from six.moves import mock
+except ImportError:
+    try:
+        # In python 3.3+ mock got included in the standard library...
+        from unittest import mock
+    except ImportError:
+        import mock
+
 from testtools import compat
 from testtools import matchers
 from testtools import testcase
@@ -85,7 +105,7 @@ class ItemsEqual(object):
         return None
 
 
-class TestCase(testcase.TestCase):
+class TestCase(base.BaseTestCase):
     """Test case base class for all taskflow unit tests."""
 
     def makeTmpDir(self):
@@ -188,19 +208,17 @@ class MockTestCase(TestCase):
         super(MockTestCase, self).setUp()
         self.master_mock = mock.Mock(name='master_mock')
 
-    def _patch(self, target, autospec=True, **kwargs):
+    def patch(self, target, autospec=True, **kwargs):
         """Patch target and attach it to the master mock."""
-        patcher = mock.patch(target, autospec=autospec, **kwargs)
-        mocked = patcher.start()
-        self.addCleanup(patcher.stop)
-
+        f = self.useFixture(mockpatch.Patch(target,
+                                            autospec=autospec, **kwargs))
+        mocked = f.mock
         attach_as = kwargs.pop('attach_as', None)
         if attach_as is not None:
             self.master_mock.attach_mock(mocked, attach_as)
-
         return mocked
 
-    def _patch_class(self, module, name, autospec=True, attach_as=None):
+    def patchClass(self, module, name, autospec=True, attach_as=None):
         """Patches a modules class.
 
         This will create a class instance mock (using the provided name to
@@ -212,9 +230,9 @@ class MockTestCase(TestCase):
         else:
             instance_mock = mock.Mock()
 
-        patcher = mock.patch.object(module, name, autospec=autospec)
-        class_mock = patcher.start()
-        self.addCleanup(patcher.stop)
+        f = self.useFixture(mockpatch.PatchObject(module, name,
+                                                  autospec=autospec))
+        class_mock = f.mock
         class_mock.return_value = instance_mock
 
         if attach_as is None:
@@ -226,8 +244,73 @@ class MockTestCase(TestCase):
 
         self.master_mock.attach_mock(class_mock, attach_class_as)
         self.master_mock.attach_mock(instance_mock, attach_instance_as)
-
         return class_mock, instance_mock
 
-    def _reset_master_mock(self):
+    def resetMasterMock(self):
         self.master_mock.reset_mock()
+
+
+class CapturingLoggingHandler(logging.Handler):
+    """A handler that saves record contents for post-test analysis."""
+
+    def __init__(self, level=logging.DEBUG):
+        # It seems needed to use the old style of base class calling, we
+        # can remove this old style when we only support py3.x
+        logging.Handler.__init__(self, level=level)
+        self._records = []
+
+    @property
+    def counts(self):
+        """Returns a dictionary with the number of records at each level."""
+        self.acquire()
+        try:
+            captured = collections.defaultdict(int)
+            for r in self._records:
+                captured[r.levelno] += 1
+            return captured
+        finally:
+            self.release()
+
+    @property
+    def messages(self):
+        """Returns a dictionary with list of record messages at each level."""
+        self.acquire()
+        try:
+            captured = collections.defaultdict(list)
+            for r in self._records:
+                captured[r.levelno].append(r.getMessage())
+            return captured
+        finally:
+            self.release()
+
+    @property
+    def exc_infos(self):
+        """Returns a list of all the record exc_info tuples captured."""
+        self.acquire()
+        try:
+            captured = []
+            for r in self._records:
+                if r.exc_info:
+                    captured.append(r.exc_info)
+            return captured
+        finally:
+            self.release()
+
+    def emit(self, record):
+        self.acquire()
+        try:
+            self._records.append(record)
+        finally:
+            self.release()
+
+    def reset(self):
+        """Resets *all* internally captured state."""
+        self.acquire()
+        try:
+            self._records = []
+        finally:
+            self.release()
+
+    def close(self):
+        logging.Handler.close(self)
+        self.reset()

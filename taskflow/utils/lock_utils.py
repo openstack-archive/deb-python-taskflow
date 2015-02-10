@@ -19,17 +19,16 @@
 # pulls in oslo.cfg) and is reduced to only what taskflow currently wants to
 # use from that code.
 
-import abc
 import collections
 import contextlib
 import errno
-import logging
 import os
 import threading
 import time
 
 import six
 
+from taskflow import logging
 from taskflow.utils import misc
 from taskflow.utils import threading_utils as tu
 
@@ -38,8 +37,13 @@ LOG = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def try_lock(lock):
-    """Attempts to acquire a lock, and autoreleases if acquisition occurred."""
-    was_locked = lock.acquire(blocking=False)
+    """Attempts to acquire a lock, and auto releases if acquired (on exit)."""
+    # NOTE(harlowja): the keyword argument for 'blocking' does not work
+    # in py2.x and only is fixed in py3.x (this adjustment is documented
+    # and/or debated in http://bugs.python.org/issue10789); so we'll just
+    # stick to the format that works in both (oddly the keyword argument
+    # works in py2.x but only with reentrant locks).
+    was_locked = lock.acquire(False)
     try:
         yield was_locked
     finally:
@@ -91,47 +95,7 @@ def locked(*args, **kwargs):
             return decorator
 
 
-@six.add_metaclass(abc.ABCMeta)
-class _ReaderWriterLockBase(object):
-    """Base class for reader/writer lock implementations."""
-
-    @abc.abstractproperty
-    def has_pending_writers(self):
-        """Returns if there are writers waiting to become the *one* writer."""
-
-    @abc.abstractmethod
-    def is_writer(self, check_pending=True):
-        """Returns if the caller is the active writer or a pending writer."""
-
-    @abc.abstractproperty
-    def owner(self):
-        """Returns whether the lock is locked by a writer or reader."""
-
-    @abc.abstractmethod
-    def is_reader(self):
-        """Returns if the caller is one of the readers."""
-
-    @abc.abstractmethod
-    def read_lock(self):
-        """Context manager that grants a read lock.
-
-        Will wait until no active or pending writers.
-
-        Raises a RuntimeError if an active or pending writer tries to acquire
-        a read lock.
-        """
-
-    @abc.abstractmethod
-    def write_lock(self):
-        """Context manager that grants a write lock.
-
-        Will wait until no active readers. Blocks readers after acquiring.
-
-        Raises a RuntimeError if an active reader attempts to acquire a lock.
-        """
-
-
-class ReaderWriterLock(_ReaderWriterLockBase):
+class ReaderWriterLock(object):
     """A reader/writer lock.
 
     This lock allows for simultaneous readers to exist but only one writer
@@ -142,6 +106,9 @@ class ReaderWriterLock(_ReaderWriterLockBase):
     the write lock.
 
     In the future these restrictions may be relaxed.
+
+    This can be eventually removed if http://bugs.python.org/issue8800 ever
+    gets accepted into the python standard threading library...
     """
     WRITER = 'w'
     READER = 'r'
@@ -154,6 +121,7 @@ class ReaderWriterLock(_ReaderWriterLockBase):
 
     @property
     def has_pending_writers(self):
+        """Returns if there are writers waiting to become the *one* writer."""
         self._cond.acquire()
         try:
             return bool(self._pending_writers)
@@ -161,6 +129,7 @@ class ReaderWriterLock(_ReaderWriterLockBase):
             self._cond.release()
 
     def is_writer(self, check_pending=True):
+        """Returns if the caller is the active writer or a pending writer."""
         self._cond.acquire()
         try:
             me = tu.get_ident()
@@ -175,6 +144,7 @@ class ReaderWriterLock(_ReaderWriterLockBase):
 
     @property
     def owner(self):
+        """Returns whether the lock is locked by a writer or reader."""
         self._cond.acquire()
         try:
             if self._writer is not None:
@@ -186,6 +156,7 @@ class ReaderWriterLock(_ReaderWriterLockBase):
             self._cond.release()
 
     def is_reader(self):
+        """Returns if the caller is one of the readers."""
         self._cond.acquire()
         try:
             return tu.get_ident() in self._readers
@@ -194,6 +165,13 @@ class ReaderWriterLock(_ReaderWriterLockBase):
 
     @contextlib.contextmanager
     def read_lock(self):
+        """Context manager that grants a read lock.
+
+        Will wait until no active or pending writers.
+
+        Raises a RuntimeError if an active or pending writer tries to acquire
+        a read lock.
+        """
         me = tu.get_ident()
         if self.is_writer():
             raise RuntimeError("Writer %s can not acquire a read lock"
@@ -226,6 +204,12 @@ class ReaderWriterLock(_ReaderWriterLockBase):
 
     @contextlib.contextmanager
     def write_lock(self):
+        """Context manager that grants a write lock.
+
+        Will wait until no active readers. Blocks readers after acquiring.
+
+        Raises a RuntimeError if an active reader attempts to acquire a lock.
+        """
         me = tu.get_ident()
         if self.is_reader():
             raise RuntimeError("Reader %s to writer privilege"
@@ -257,7 +241,7 @@ class ReaderWriterLock(_ReaderWriterLockBase):
                     self._cond.release()
 
 
-class DummyReaderWriterLock(_ReaderWriterLockBase):
+class DummyReaderWriterLock(object):
     """A dummy reader/writer lock.
 
     This dummy lock doesn't lock anything but provides the same functions as a
@@ -291,46 +275,122 @@ class MultiLock(object):
     """A class which attempts to obtain & release many locks at once.
 
     It is typically useful as a context manager around many locks (instead of
-    having to nest individual lock context managers).
+    having to nest individual lock context managers, which can become pretty
+    awkward looking).
+
+    NOTE(harlowja): The locks that will be obtained will be in the order the
+    locks are given in the constructor, they will be acquired in order and
+    released in reverse order (so ordering matters).
     """
 
     def __init__(self, locks):
-        assert len(locks) > 0, "Zero locks requested"
+        if not isinstance(locks, tuple):
+            locks = tuple(locks)
+        if len(locks) <= 0:
+            raise ValueError("Zero locks requested")
         self._locks = locks
-        self._locked = [False] * len(locks)
+        self._local = threading.local()
+
+    @property
+    def _lock_stacks(self):
+        # This is weird, but this is how thread locals work (in that each
+        # thread will need to check if it has already created the attribute and
+        # if not then create it and set it to the thread local variable...)
+        #
+        # This isn't done in the constructor since the constructor is only
+        # activated by one of the many threads that could use this object,
+        # and that means that the attribute will only exist for that one
+        # thread.
+        try:
+            return self._local.stacks
+        except AttributeError:
+            self._local.stacks = []
+            return self._local.stacks
 
     def __enter__(self):
-        self.acquire()
+        return self.acquire()
+
+    @property
+    def obtained(self):
+        """Returns how many locks were last acquired/obtained."""
+        try:
+            return self._lock_stacks[-1]
+        except IndexError:
+            return 0
+
+    def __len__(self):
+        return len(self._locks)
 
     def acquire(self):
+        """This will attempt to acquire all the locks given in the constructor.
 
-        def is_locked(lock):
-            # NOTE(harlowja): reentrant locks (rlock) don't have this
-            # attribute, but normal non-reentrant locks do, how odd...
-            if hasattr(lock, 'locked'):
-                return lock.locked()
-            return False
+        If all the locks can not be acquired (and say only X of Y locks could
+        be acquired then this will return false to signify that not all the
+        locks were able to be acquired, you can later use the :attr:`.obtained`
+        property to determine how many were obtained during the last
+        acquisition attempt).
 
-        for i in range(0, len(self._locked)):
-            if self._locked[i] or is_locked(self._locks[i]):
-                raise threading.ThreadError("Lock %s not previously released"
-                                            % (i + 1))
-            self._locked[i] = False
-
-        for (i, lock) in enumerate(self._locks):
-            self._locked[i] = lock.acquire()
+        NOTE(harlowja): When not all locks were acquired it is still required
+        to release since under partial acquisition the acquired locks
+        must still be released. For example if 4 out of 5 locks were acquired
+        this will return false, but the user **must** still release those
+        other 4 to avoid causing locking issues...
+        """
+        gotten = 0
+        for lock in self._locks:
+            try:
+                acked = lock.acquire()
+            except (threading.ThreadError, RuntimeError) as e:
+                # If we have already gotten some set of the desired locks
+                # make sure we track that and ensure that we later release them
+                # instead of losing them.
+                if gotten:
+                    self._lock_stacks.append(gotten)
+                raise threading.ThreadError(
+                    "Unable to acquire lock %s/%s due to '%s'"
+                    % (gotten + 1, len(self._locks), e))
+            else:
+                if not acked:
+                    break
+                else:
+                    gotten += 1
+        if gotten:
+            self._lock_stacks.append(gotten)
+        return gotten == len(self._locks)
 
     def __exit__(self, type, value, traceback):
         self.release()
 
     def release(self):
-        for (i, locked) in enumerate(self._locked):
+        """Releases any past acquired locks (partial or otherwise)."""
+        height = len(self._lock_stacks)
+        if not height:
+            # Raise the same error type as the threading.Lock raises so that
+            # it matches the behavior of the built-in class (it's odd though
+            # that the threading.RLock raises a runtime error on this same
+            # method instead...)
+            raise threading.ThreadError('Release attempted on unlocked lock')
+        # Cleans off one level of the stack (this is done so that if there
+        # are multiple __enter__() and __exit__() pairs active that this will
+        # only remove one level (the last one), and not all levels...
+        leftover = self._lock_stacks[-1]
+        while leftover:
+            lock = self._locks[leftover - 1]
             try:
-                if locked:
-                    self._locks[i].release()
-                    self._locked[i] = False
-            except threading.ThreadError:
-                LOG.exception("Unable to release lock %s", i + 1)
+                lock.release()
+            except (threading.ThreadError, RuntimeError) as e:
+                # Ensure that we adjust the lock stack under failure so that
+                # if release is attempted again that we do not try to release
+                # the locks we already released...
+                self._lock_stacks[-1] = leftover
+                raise threading.ThreadError(
+                    "Unable to release lock %s/%s due to '%s'"
+                    % (leftover, len(self._locks), e))
+            else:
+                leftover -= 1
+        # At the end only clear it off, so that under partial failure we don't
+        # lose any locks...
+        self._lock_stacks.pop()
 
 
 class _InterProcessLock(object):

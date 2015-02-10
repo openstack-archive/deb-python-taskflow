@@ -31,13 +31,15 @@ top_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),
 sys.path.insert(0, top_dir)
 sys.path.insert(0, self_dir)
 
+from oslo_utils import uuidutils
+
 from taskflow import engines
 from taskflow import exceptions as exc
-from taskflow.openstack.common import uuidutils
 from taskflow.patterns import graph_flow as gf
 from taskflow.patterns import linear_flow as lf
 from taskflow import task
-from taskflow.utils import eventlet_utils as e_utils
+from taskflow.types import futures
+from taskflow.utils import eventlet_utils
 from taskflow.utils import persistence_utils as p_utils
 
 import example_utils as eu  # noqa
@@ -141,7 +143,7 @@ class AllocateIP(task.Task):
 
     def execute(self, vm_spec):
         ips = []
-        for i in range(0, vm_spec.get('ips', 0)):
+        for _i in range(0, vm_spec.get('ips', 0)):
             ips.append("192.168.0.%s" % (random.randint(1, 254)))
         return ips
 
@@ -235,11 +237,9 @@ with eu.get_backend() as backend:
         flow_id = None
 
     # Set up how we want our engine to run, serial, parallel...
-    engine_conf = {
-        'engine': 'parallel',
-    }
-    if e_utils.EVENTLET_AVAILABLE:
-        engine_conf['executor'] = e_utils.GreenExecutor(5)
+    executor = None
+    if eventlet_utils.EVENTLET_AVAILABLE:
+        executor = futures.GreenThreadPoolExecutor(5)
 
     # Create/fetch a logbook that will track the workflows work.
     book = None
@@ -255,15 +255,15 @@ with eu.get_backend() as backend:
         book = p_utils.temporary_log_book(backend)
         engine = engines.load_from_factory(create_flow,
                                            backend=backend, book=book,
-                                           engine_conf=engine_conf)
+                                           engine='parallel',
+                                           executor=executor)
         print("!! Your tracking id is: '%s+%s'" % (book.uuid,
                                                    engine.storage.flow_uuid))
         print("!! Please submit this on later runs for tracking purposes")
     else:
         # Attempt to load from a previously partially completed flow.
-        engine = engines.load_from_detail(flow_detail,
-                                          backend=backend,
-                                          engine_conf=engine_conf)
+        engine = engines.load_from_detail(flow_detail, backend=backend,
+                                          engine='parallel', executor=executor)
 
     # Make me my vm please!
     eu.print_wrapped('Running')

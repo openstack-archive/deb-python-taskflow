@@ -17,15 +17,15 @@
 
 import abc
 import copy
-import logging
 
+from oslo_utils import timeutils
+from oslo_utils import uuidutils
 import six
 
 from taskflow import exceptions as exc
-from taskflow.openstack.common import timeutils
-from taskflow.openstack.common import uuidutils
+from taskflow import logging
 from taskflow import states
-from taskflow.utils import misc
+from taskflow.types import failure as ft
 
 LOG = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def _safe_unmarshal_time(when):
 
 
 def _was_failure(state, result):
-    return state == states.FAILURE and isinstance(result, misc.Failure)
+    return state == states.FAILURE and isinstance(result, ft.Failure)
 
 
 def _fix_meta(data):
@@ -137,7 +137,7 @@ class LogBook(object):
 
     @classmethod
     def from_dict(cls, data, unmarshal_time=False):
-        """Translates the given data into an instance of this class."""
+        """Translates the given dictionary into an instance of this class."""
         if not unmarshal_time:
             unmarshal_fn = lambda x: x
         else:
@@ -163,6 +163,17 @@ class LogBook(object):
     def __len__(self):
         return len(self._flowdetails_by_id)
 
+    def copy(self, retain_contents=True):
+        """Copies/clones this log book."""
+        clone = copy.copy(self)
+        if not retain_contents:
+            clone._flowdetails_by_id = {}
+        else:
+            clone._flowdetails_by_id = self._flowdetails_by_id.copy()
+        if self.meta:
+            clone.meta = self.meta.copy()
+        return clone
+
 
 class FlowDetail(object):
     """A container of atom details, a name and associated metadata.
@@ -186,7 +197,7 @@ class FlowDetail(object):
         """Updates the objects state to be the same as the given one."""
         if fd is self:
             return self
-        self._atomdetails_by_id = dict(fd._atomdetails_by_id)
+        self._atomdetails_by_id = fd._atomdetails_by_id
         self.state = fd.state
         self.meta = fd.meta
         return self
@@ -205,6 +216,17 @@ class FlowDetail(object):
             # NOTE(imelnikov): states are just strings, no need to copy.
             self.state = fd.state
         return self
+
+    def copy(self, retain_contents=True):
+        """Copies/clones this flow detail."""
+        clone = copy.copy(self)
+        if not retain_contents:
+            clone._atomdetails_by_id = {}
+        else:
+            clone._atomdetails_by_id = self._atomdetails_by_id.copy()
+        if self.meta:
+            clone.meta = self.meta.copy()
+        return clone
 
     def to_dict(self):
         """Translates the internal state of this object to a dictionary.
@@ -363,7 +385,7 @@ class AtomDetail(object):
         self.meta = _fix_meta(data)
         failure = data.get('failure')
         if failure:
-            self.failure = misc.Failure.from_dict(failure)
+            self.failure = ft.Failure.from_dict(failure)
 
     @property
     def uuid(self):
@@ -380,6 +402,7 @@ class AtomDetail(object):
 
 class TaskDetail(AtomDetail):
     """This class represents a task detail for flow task object."""
+
     def __init__(self, name, uuid):
         super(TaskDetail, self).__init__(name, uuid)
 
@@ -410,8 +433,10 @@ class TaskDetail(AtomDetail):
         return self._to_dict_shared()
 
     def merge(self, other, deep_copy=False):
+        """Merges the current object state with the given ones state."""
         if not isinstance(other, TaskDetail):
-            raise NotImplementedError("Can only merge with other task details")
+            raise exc.NotImplementedError("Can only merge with other"
+                                          " task details")
         if other is self:
             return self
         super(TaskDetail, self).merge(other, deep_copy=deep_copy)
@@ -419,6 +444,16 @@ class TaskDetail(AtomDetail):
         if self.results != other.results:
             self.results = copy_fn(other.results)
         return self
+
+    def copy(self):
+        """Copies/clones this task detail."""
+        clone = copy.copy(self)
+        clone.results = copy.copy(self.results)
+        if self.meta:
+            clone.meta = self.meta.copy()
+        if self.version:
+            clone.version = copy.copy(self.version)
+        return clone
 
 
 class RetryDetail(AtomDetail):
@@ -432,6 +467,24 @@ class RetryDetail(AtomDetail):
         self.failure = None
         self.state = state
         self.intention = states.EXECUTE
+
+    def copy(self):
+        """Copies/clones this retry detail."""
+        clone = copy.copy(self)
+        results = []
+        # NOTE(imelnikov): we can't just deep copy Failures, as they
+        # contain tracebacks, which are not copyable.
+        for (data, failures) in self.results:
+            copied_failures = {}
+            for (key, failure) in six.iteritems(failures):
+                copied_failures[key] = failure
+            results.append((data, copied_failures))
+        clone.results = results
+        if self.meta:
+            clone.meta = self.meta.copy()
+        if self.version:
+            clone.version = copy.copy(self.version)
+        return clone
 
     @property
     def last_results(self):
@@ -466,8 +519,8 @@ class RetryDetail(AtomDetail):
             new_results = []
             for (data, failures) in results:
                 new_failures = {}
-                for (key, failure_data) in six.iteritems(failures):
-                    new_failures[key] = misc.Failure.from_dict(failure_data)
+                for (key, data) in six.iteritems(failures):
+                    new_failures[key] = ft.Failure.from_dict(data)
                 new_results.append((data, new_failures))
             return new_results
 
@@ -495,9 +548,10 @@ class RetryDetail(AtomDetail):
         return base
 
     def merge(self, other, deep_copy=False):
+        """Merges the current object state with the given ones state."""
         if not isinstance(other, RetryDetail):
-            raise NotImplementedError("Can only merge with other retry "
-                                      "details")
+            raise exc.NotImplementedError("Can only merge with other"
+                                          " retry details")
         if other is self:
             return self
         super(RetryDetail, self).merge(other, deep_copy=deep_copy)
@@ -529,11 +583,12 @@ def atom_detail_class(atom_type):
     try:
         return _NAME_TO_DETAIL[atom_type]
     except KeyError:
-        raise TypeError("Unknown atom type: %s" % (atom_type))
+        raise TypeError("Unknown atom type '%s'" % (atom_type))
 
 
 def atom_detail_type(atom_detail):
     try:
         return _DETAIL_TO_NAME[type(atom_detail)]
     except KeyError:
-        raise TypeError("Unknown atom type: %s" % type(atom_detail))
+        raise TypeError("Unknown atom '%s' (%s)"
+                        % (atom_detail, type(atom_detail)))

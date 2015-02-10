@@ -27,10 +27,10 @@ top_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),
                                        os.pardir))
 sys.path.insert(0, top_dir)
 
+from oslo_utils import uuidutils
 
 from taskflow import engines
 from taskflow.listeners import printing
-from taskflow.openstack.common import uuidutils
 from taskflow.patterns import graph_flow as gf
 from taskflow.patterns import linear_flow as lf
 from taskflow import task
@@ -148,6 +148,12 @@ class DeclareSuccess(task.Task):
         print("All data processed and sent to %s" % (sent_to))
 
 
+class DummyUser(object):
+    def __init__(self, user, id_):
+        self.user = user
+        self.id = id_
+
+
 # Resources (db handles and similar) of course can *not* be persisted so we
 # need to make sure that we pass this resource fetcher to the tasks constructor
 # so that the tasks have access to any needed resources (the resources are
@@ -168,9 +174,9 @@ flow.add(sub_flow)
 # prepopulating this allows the tasks that dependent on the 'request' variable
 # to start processing (in this case this is the ExtractInputRequest task).
 store = {
-    'request': misc.AttrDict(user="bob", id="1.35"),
+    'request': DummyUser(user="bob", id_="1.35"),
 }
-eng = engines.load(flow, engine_conf='serial', store=store)
+eng = engines.load(flow, engine='serial', store=store)
 
 # This context manager automatically adds (and automatically removes) a
 # helpful set of state transition notification printing helper utilities

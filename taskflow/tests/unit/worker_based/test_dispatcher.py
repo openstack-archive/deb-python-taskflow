@@ -14,11 +14,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from kombu import message
-import mock
+try:
+    from kombu import message  # noqa
+except ImportError:
+    from kombu.transport import base as message
 
 from taskflow.engines.worker_based import dispatcher
 from taskflow import test
+from taskflow.test import mock
 
 
 def mock_acked_message(ack_ok=True, **kwargs):
@@ -34,16 +37,16 @@ def mock_acked_message(ack_ok=True, **kwargs):
     return msg
 
 
-class TestDispatcher(test.MockTestCase):
+class TestDispatcher(test.TestCase):
     def test_creation(self):
         on_hello = mock.MagicMock()
         handlers = {'hello': on_hello}
-        dispatcher.TypeDispatcher(handlers)
+        dispatcher.TypeDispatcher(type_handlers=handlers)
 
     def test_on_message(self):
         on_hello = mock.MagicMock()
         handlers = {'hello': on_hello}
-        d = dispatcher.TypeDispatcher(handlers)
+        d = dispatcher.TypeDispatcher(type_handlers=handlers)
         msg = mock_acked_message(properties={'type': 'hello'})
         d.on_message("", msg)
         self.assertTrue(on_hello.called)
@@ -51,15 +54,15 @@ class TestDispatcher(test.MockTestCase):
         self.assertTrue(msg.acknowledged)
 
     def test_on_rejected_message(self):
-        d = dispatcher.TypeDispatcher({})
+        d = dispatcher.TypeDispatcher()
         msg = mock_acked_message(properties={'type': 'hello'})
         d.on_message("", msg)
         self.assertTrue(msg.reject_log_error.called)
         self.assertFalse(msg.acknowledged)
 
     def test_on_requeue_message(self):
-        d = dispatcher.TypeDispatcher({})
-        d.add_requeue_filter(lambda data, message: True)
+        d = dispatcher.TypeDispatcher()
+        d.requeue_filters.append(lambda data, message: True)
         msg = mock_acked_message()
         d.on_message("", msg)
         self.assertTrue(msg.requeue.called)
@@ -68,7 +71,7 @@ class TestDispatcher(test.MockTestCase):
     def test_failed_ack(self):
         on_hello = mock.MagicMock()
         handlers = {'hello': on_hello}
-        d = dispatcher.TypeDispatcher(handlers)
+        d = dispatcher.TypeDispatcher(type_handlers=handlers)
         msg = mock_acked_message(ack_ok=False,
                                  properties={'type': 'hello'})
         d.on_message("", msg)

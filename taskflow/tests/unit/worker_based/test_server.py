@@ -14,15 +14,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
 import six
 
 from taskflow.engines.worker_based import endpoint as ep
 from taskflow.engines.worker_based import protocol as pr
 from taskflow.engines.worker_based import server
+from taskflow import task as task_atom
 from taskflow import test
+from taskflow.test import mock
 from taskflow.tests import utils
-from taskflow.utils import misc
+from taskflow.types import failure
 
 
 class TestServer(test.MockTestCase):
@@ -42,9 +43,9 @@ class TestServer(test.MockTestCase):
                           ep.Endpoint(task_cls=utils.ProgressingTask)]
 
         # patch classes
-        self.proxy_mock, self.proxy_inst_mock = self._patch_class(
+        self.proxy_mock, self.proxy_inst_mock = self.patchClass(
             server.proxy, 'Proxy')
-        self.response_mock, self.response_inst_mock = self._patch_class(
+        self.response_mock, self.response_inst_mock = self.patchClass(
             server.pr, 'Response')
 
         # other mocking
@@ -66,7 +67,7 @@ class TestServer(test.MockTestCase):
         server_kwargs.update(kwargs)
         s = server.Server(**server_kwargs)
         if reset_master_mock:
-            self._reset_master_mock()
+            self.resetMasterMock()
         return s
 
     def make_request(self, **kwargs):
@@ -85,7 +86,9 @@ class TestServer(test.MockTestCase):
         # check calls
         master_mock_calls = [
             mock.call.Proxy(self.server_topic, self.server_exchange,
-                            mock.ANY, url=self.broker_url, on_wait=mock.ANY)
+                            type_handlers=mock.ANY, url=self.broker_url,
+                            transport=mock.ANY, transport_options=mock.ANY,
+                            retry_options=mock.ANY)
         ]
         self.master_mock.assert_has_calls(master_mock_calls)
         self.assertEqual(len(s._endpoints), 3)
@@ -96,69 +99,77 @@ class TestServer(test.MockTestCase):
         # check calls
         master_mock_calls = [
             mock.call.Proxy(self.server_topic, self.server_exchange,
-                            mock.ANY, url=self.broker_url, on_wait=mock.ANY)
+                            type_handlers=mock.ANY, url=self.broker_url,
+                            transport=mock.ANY, transport_options=mock.ANY,
+                            retry_options=mock.ANY)
         ]
         self.master_mock.assert_has_calls(master_mock_calls)
         self.assertEqual(len(s._endpoints), len(self.endpoints))
 
     def test_parse_request(self):
         request = self.make_request()
-        task_cls, action, task_args = server.Server._parse_request(**request)
-
-        self.assertEqual((task_cls, action, task_args),
-                         (self.task.name, self.task_action,
-                          dict(task_name=self.task.name,
-                               arguments=self.task_args)))
+        bundle = server.Server._parse_request(**request)
+        task_cls, task_name, action, task_args = bundle
+        self.assertEqual((task_cls, task_name, action, task_args),
+                         (self.task.name, self.task.name, self.task_action,
+                          dict(arguments=self.task_args)))
 
     def test_parse_request_with_success_result(self):
         request = self.make_request(action='revert', result=1)
-        task_cls, action, task_args = server.Server._parse_request(**request)
-
-        self.assertEqual((task_cls, action, task_args),
-                         (self.task.name, 'revert',
-                          dict(task_name=self.task.name,
-                               arguments=self.task_args,
+        bundle = server.Server._parse_request(**request)
+        task_cls, task_name, action, task_args = bundle
+        self.assertEqual((task_cls, task_name, action, task_args),
+                         (self.task.name, self.task.name, 'revert',
+                          dict(arguments=self.task_args,
                                result=1)))
 
     def test_parse_request_with_failure_result(self):
-        failure = misc.Failure.from_exception(Exception('test'))
-        request = self.make_request(action='revert', result=failure)
-        task_cls, action, task_args = server.Server._parse_request(**request)
-
-        self.assertEqual((task_cls, action, task_args),
-                         (self.task.name, 'revert',
-                          dict(task_name=self.task.name,
-                               arguments=self.task_args,
-                               result=utils.FailureMatcher(failure))))
+        a_failure = failure.Failure.from_exception(Exception('test'))
+        request = self.make_request(action='revert', result=a_failure)
+        bundle = server.Server._parse_request(**request)
+        task_cls, task_name, action, task_args = bundle
+        self.assertEqual((task_cls, task_name, action, task_args),
+                         (self.task.name, self.task.name, 'revert',
+                          dict(arguments=self.task_args,
+                               result=utils.FailureMatcher(a_failure))))
 
     def test_parse_request_with_failures(self):
-        failures = {'0': misc.Failure.from_exception(Exception('test1')),
-                    '1': misc.Failure.from_exception(Exception('test2'))}
+        failures = {'0': failure.Failure.from_exception(Exception('test1')),
+                    '1': failure.Failure.from_exception(Exception('test2'))}
         request = self.make_request(action='revert', failures=failures)
-        task_cls, action, task_args = server.Server._parse_request(**request)
-
+        bundle = server.Server._parse_request(**request)
+        task_cls, task_name, action, task_args = bundle
         self.assertEqual(
-            (task_cls, action, task_args),
-            (self.task.name, 'revert',
-             dict(task_name=self.task.name,
-                  arguments=self.task_args,
+            (task_cls, task_name, action, task_args),
+            (self.task.name, self.task.name, 'revert',
+             dict(arguments=self.task_args,
                   failures=dict((i, utils.FailureMatcher(f))
                                 for i, f in six.iteritems(failures)))))
 
-    @mock.patch("taskflow.engines.worker_based.server.LOG.exception")
+    @mock.patch("taskflow.engines.worker_based.server.LOG.critical")
     def test_reply_publish_failure(self, mocked_exception):
         self.proxy_inst_mock.publish.side_effect = RuntimeError('Woot!')
 
         # create server and process request
         s = self.server(reset_master_mock=True)
-        s._reply(self.reply_to, self.task_uuid)
+        s._reply(True, self.reply_to, self.task_uuid)
 
-        self.assertEqual(self.master_mock.mock_calls, [
+        self.master_mock.assert_has_calls([
             mock.call.Response(pr.FAILURE),
             mock.call.proxy.publish(self.response_inst_mock, self.reply_to,
                                     correlation_id=self.task_uuid)
         ])
         self.assertTrue(mocked_exception.called)
+
+    def test_on_run_reply_failure(self):
+        request = self.make_request(task=utils.ProgressingTask(), arguments={})
+        self.proxy_inst_mock.publish.side_effect = RuntimeError('Woot!')
+
+        # create server and process request
+        s = self.server(reset_master_mock=True)
+        s._process_request(request, self.message_mock)
+
+        self.assertEqual(1, self.proxy_inst_mock.publish.call_count)
 
     def test_on_update_progress(self):
         request = self.make_request(task=utils.ProgressingTask(), arguments={})
@@ -172,17 +183,19 @@ class TestServer(test.MockTestCase):
             mock.call.Response(pr.RUNNING),
             mock.call.proxy.publish(self.response_inst_mock, self.reply_to,
                                     correlation_id=self.task_uuid),
-            mock.call.Response(pr.PROGRESS, progress=0.0, event_data={}),
+            mock.call.Response(pr.EVENT, details={'progress': 0.0},
+                               event_type=task_atom.EVENT_UPDATE_PROGRESS),
             mock.call.proxy.publish(self.response_inst_mock, self.reply_to,
                                     correlation_id=self.task_uuid),
-            mock.call.Response(pr.PROGRESS, progress=1.0, event_data={}),
+            mock.call.Response(pr.EVENT, details={'progress': 1.0},
+                               event_type=task_atom.EVENT_UPDATE_PROGRESS),
             mock.call.proxy.publish(self.response_inst_mock, self.reply_to,
                                     correlation_id=self.task_uuid),
             mock.call.Response(pr.SUCCESS, result=5),
             mock.call.proxy.publish(self.response_inst_mock, self.reply_to,
                                     correlation_id=self.task_uuid)
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
     def test_process_request(self):
         # create server and process request
@@ -198,28 +211,26 @@ class TestServer(test.MockTestCase):
             mock.call.proxy.publish(self.response_inst_mock, self.reply_to,
                                     correlation_id=self.task_uuid)
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
-    @mock.patch("taskflow.engines.worker_based.server.LOG.exception")
+    @mock.patch("taskflow.engines.worker_based.server.LOG.warn")
     def test_process_request_parse_message_failure(self, mocked_exception):
         self.message_mock.properties = {}
         request = self.make_request()
         s = self.server(reset_master_mock=True)
         s._process_request(request, self.message_mock)
-
-        self.assertEqual(self.master_mock.mock_calls, [])
         self.assertTrue(mocked_exception.called)
 
-    @mock.patch.object(misc.Failure, 'from_dict')
-    @mock.patch.object(misc.Failure, 'to_dict')
+    @mock.patch.object(failure.Failure, 'from_dict')
+    @mock.patch.object(failure.Failure, 'to_dict')
     def test_process_request_parse_request_failure(self, to_mock, from_mock):
         failure_dict = {
             'failure': 'failure',
         }
-        failure = misc.Failure.from_exception(RuntimeError('Woot!'))
+        a_failure = failure.Failure.from_exception(RuntimeError('Woot!'))
         to_mock.return_value = failure_dict
         from_mock.side_effect = ValueError('Woot!')
-        request = self.make_request(result=failure)
+        request = self.make_request(result=a_failure)
 
         # create server and process request
         s = self.server(reset_master_mock=True)
@@ -232,9 +243,9 @@ class TestServer(test.MockTestCase):
                                     self.reply_to,
                                     correlation_id=self.task_uuid)
         ]
-        self.assertEqual(master_mock_calls, self.master_mock.mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
-    @mock.patch.object(misc.Failure, 'to_dict')
+    @mock.patch.object(failure.Failure, 'to_dict')
     def test_process_request_endpoint_not_found(self, to_mock):
         failure_dict = {
             'failure': 'failure',
@@ -253,9 +264,9 @@ class TestServer(test.MockTestCase):
                                     self.reply_to,
                                     correlation_id=self.task_uuid)
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
-    @mock.patch.object(misc.Failure, 'to_dict')
+    @mock.patch.object(failure.Failure, 'to_dict')
     def test_process_request_execution_failure(self, to_mock):
         failure_dict = {
             'failure': 'failure',
@@ -270,17 +281,14 @@ class TestServer(test.MockTestCase):
 
         # check calls
         master_mock_calls = [
-            mock.call.Response(pr.RUNNING),
-            mock.call.proxy.publish(self.response_inst_mock, self.reply_to,
-                                    correlation_id=self.task_uuid),
             mock.call.Response(pr.FAILURE, result=failure_dict),
             mock.call.proxy.publish(self.response_inst_mock,
                                     self.reply_to,
                                     correlation_id=self.task_uuid)
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
-    @mock.patch.object(misc.Failure, 'to_dict')
+    @mock.patch.object(failure.Failure, 'to_dict')
     def test_process_request_task_failure(self, to_mock):
         failure_dict = {
             'failure': 'failure',
@@ -302,7 +310,7 @@ class TestServer(test.MockTestCase):
                                     self.reply_to,
                                     correlation_id=self.task_uuid)
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
     def test_start(self):
         self.server(reset_master_mock=True).start()
@@ -311,7 +319,7 @@ class TestServer(test.MockTestCase):
         master_mock_calls = [
             mock.call.proxy.start()
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
     def test_wait(self):
         server = self.server(reset_master_mock=True)
@@ -323,7 +331,7 @@ class TestServer(test.MockTestCase):
             mock.call.proxy.start(),
             mock.call.proxy.wait()
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)
 
     def test_stop(self):
         self.server(reset_master_mock=True).stop()
@@ -332,4 +340,4 @@ class TestServer(test.MockTestCase):
         master_mock_calls = [
             mock.call.proxy.stop()
         ]
-        self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+        self.master_mock.assert_has_calls(master_mock_calls)

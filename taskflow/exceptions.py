@@ -14,6 +14,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
 import traceback
 
 import six
@@ -25,6 +26,14 @@ class TaskFlowException(Exception):
     NOTE(harlowja): in later versions of python we can likely remove the need
     to have a cause here as PY3+ have implemented PEP 3134 which handles
     chaining in a much more elegant manner.
+
+    :param message: the exception message, typically some string that is
+                    useful for consumers to view when debugging or analyzing
+                    failures.
+    :param cause: the cause of the exception being raised, when provided this
+                  should itself be an exception instance, this is useful for
+                  creating a chain of exceptions for versions of python where
+                  this is not yet implemented/supported natively.
     """
     def __init__(self, message, cause=None):
         super(TaskFlowException, self).__init__(message)
@@ -38,21 +47,31 @@ class TaskFlowException(Exception):
         """Pretty formats a taskflow exception + any connected causes."""
         if indent < 0:
             raise ValueError("indent must be greater than or equal to zero")
+        return os.linesep.join(self._pformat(self, [], 0,
+                                             indent=indent,
+                                             indent_text=indent_text))
 
-        def _format(excp, indent_by):
-            lines = []
-            for line in traceback.format_exception_only(type(excp), excp):
-                # We'll add our own newlines on at the end of formatting.
-                if line.endswith("\n"):
-                    line = line[0:-1]
-                lines.append((indent_text * indent_by) + line)
-            try:
-                lines.extend(_format(excp.cause, indent_by + indent))
-            except AttributeError:
-                pass
-            return lines
-
-        return "\n".join(_format(self, 0))
+    @classmethod
+    def _pformat(cls, excp, lines, current_indent, indent=2, indent_text=" "):
+        line_prefix = indent_text * current_indent
+        for line in traceback.format_exception_only(type(excp), excp):
+            # We'll add our own newlines on at the end of formatting.
+            #
+            # NOTE(harlowja): the reason we don't search for os.linesep is
+            # that the traceback module seems to only use '\n' (for some
+            # reason).
+            if line.endswith("\n"):
+                line = line[0:-1]
+            lines.append(line_prefix + line)
+        try:
+            cause = excp.cause
+        except AttributeError:
+            pass
+        else:
+            if cause is not None:
+                cls._pformat(cause, lines, current_indent + indent,
+                             indent=indent, indent_text=indent_text)
+        return lines
 
 
 # Errors related to storage or operations on storage units.
@@ -98,8 +117,21 @@ class DependencyFailure(TaskFlowException):
     """Raised when some type of dependency problem occurs."""
 
 
+class AmbiguousDependency(DependencyFailure):
+    """Raised when some type of ambiguous dependency problem occurs."""
+
+
 class MissingDependencies(DependencyFailure):
-    """Raised when a entity has dependencies that can not be satisfied."""
+    """Raised when a entity has dependencies that can not be satisfied.
+
+    :param who: the entity that caused the missing dependency to be triggered.
+    :param requirements: the dependency which were not satisfied.
+
+    Further arguments are interpreted as for in
+    :py:class:`~taskflow.exceptions.TaskFlowException`.
+    """
+
+    #: Exception message template used when creating an actual message.
     MESSAGE_TPL = ("%(who)s requires %(requirements)s but no other entity"
                    " produces said requirements")
 
@@ -107,6 +139,10 @@ class MissingDependencies(DependencyFailure):
         message = self.MESSAGE_TPL % {'who': who, 'requirements': requirements}
         super(MissingDependencies, self).__init__(message, cause=cause)
         self.missing_requirements = requirements
+
+
+class CompilationFailure(TaskFlowException):
+    """Raised when some type of compilation issue is found."""
 
 
 class IncompatibleVersion(TaskFlowException):
@@ -135,13 +171,30 @@ class InvalidFormat(TaskFlowException):
 
 # Others.
 
-class WrappedFailure(Exception):
-    """Wraps one or several failures.
+class NotImplementedError(NotImplementedError):
+    """Exception for when some functionality really isn't implemented.
 
-    When exception cannot be re-raised (for example, because
-    the value and traceback is lost in serialization) or
-    there are several exceptions, we wrap corresponding Failure
-    objects into this exception class.
+    This is typically useful when the library itself needs to distinguish
+    internal features not being made available from users features not being
+    made available/implemented (and to avoid misinterpreting the two).
+    """
+
+
+class WrappedFailure(Exception):
+    """Wraps one or several failure objects.
+
+    When exception/s cannot be re-raised (for example, because the value and
+    traceback are lost in serialization) or there are several exceptions active
+    at the same time (due to more than one thread raising exceptions), we will
+    wrap the corresponding failure objects into this exception class and
+    *may* reraise this exception type to allow users to handle the contained
+    failures/causes as they see fit...
+
+    See the failure class documentation for a more comprehensive set of reasons
+    why this object *may* be reraised instead of the original exception.
+
+    :param causes: the :py:class:`~taskflow.types.failure.Failure` objects
+                   that caused this this exception to be raised.
     """
 
     def __init__(self, causes):
@@ -163,12 +216,14 @@ class WrappedFailure(Exception):
         return len(self._causes)
 
     def check(self, *exc_classes):
-        """Check if any of exc_classes caused (part of) the failure.
+        """Check if any of exception classes caused the failure/s.
 
-        Arguments of this method can be exception types or type names
-        (strings). If any of wrapped failures were caused by exception
-        of given type, the corresponding argument is returned. Else,
-        None is returned.
+        :param exc_classes: exception types/exception type names to
+                            search for.
+
+        If any of the contained failures were caused by an exception of a
+        given type, the corresponding argument that matched is returned. If
+        not then none is returned.
         """
         if not exc_classes:
             return None
@@ -184,7 +239,10 @@ class WrappedFailure(Exception):
 
 
 def exception_message(exc):
-    """Return the string representation of exception."""
+    """Return the string representation of exception.
+
+    :param exc: exception object to get a string representation of.
+    """
     # NOTE(imelnikov): Dealing with non-ascii data in python is difficult:
     # https://bugs.launchpad.net/taskflow/+bug/1275895
     # https://bugs.launchpad.net/taskflow/+bug/1276053

@@ -16,7 +16,6 @@
 #    under the License.
 
 import abc
-import logging
 
 import six
 
@@ -24,52 +23,99 @@ from taskflow import atom
 from taskflow import exceptions as exc
 from taskflow.utils import misc
 
-LOG = logging.getLogger(__name__)
-
 # Decision results.
 REVERT = "REVERT"
 REVERT_ALL = "REVERT_ALL"
 RETRY = "RETRY"
 
+# Constants passed into revert/execute kwargs.
+#
+# Contains information about the past decisions and outcomes that have
+# occurred (if available).
+EXECUTE_REVERT_HISTORY = 'history'
+#
+# The cause of the flow failure/s
+REVERT_FLOW_FAILURES = 'flow_failures'
 
-@six.add_metaclass(abc.ABCMeta)
-class Decider(object):
-    """A class/mixin object that can decide how to resolve execution failures.
 
-    A decider may be executed multiple times on subflow or other atom
-    failure and it is expected to make a decision about what should be done
-    to resolve the failure (retry, revert to the previous retry, revert
-    the whole flow, etc.).
-    """
+class History(object):
+    """Helper that simplifies interactions with retry historical contents."""
 
-    @abc.abstractmethod
-    def on_failure(self, history, *args, **kwargs):
-        """On failure makes a decision about the future.
+    def __init__(self, contents, failure=None):
+        self._contents = contents
+        self._failure = failure
 
-        This method will typically use information about prior failures (if
-        this historical failure information is not available or was not
-        persisted this history will be empty).
+    @property
+    def failure(self):
+        """Returns the retries own failure or none if not existent."""
+        return self._failure
 
-        Returns retry action constant:
+    def outcomes_iter(self, index=None):
+        """Iterates over the contained failure outcomes.
 
-        * ``RETRY`` when subflow must be reverted and restarted again (maybe
-          with new parameters).
-        * ``REVERT`` when this subflow must be completely reverted and parent
-          subflow should make a decision about the flow execution.
-        * ``REVERT_ALL`` in a case when the whole flow must be reverted and
-          marked as ``FAILURE``.
+        If the index is not provided, then all outcomes are iterated over.
+
+        NOTE(harlowja): if the retry itself failed, this will **not** include
+        those types of failures. Use the :py:attr:`.failure` attribute to
+        access that instead (if it exists, aka, non-none).
         """
+        if index is None:
+            contents = self._contents
+        else:
+            contents = [
+                self._contents[index],
+            ]
+        for (provided, outcomes) in contents:
+            for (owner, outcome) in six.iteritems(outcomes):
+                yield (owner, outcome)
+
+    def __len__(self):
+        return len(self._contents)
+
+    def provided_iter(self):
+        """Iterates over all the values the retry has attempted (in order)."""
+        for (provided, outcomes) in self._contents:
+            yield provided
+
+    def __getitem__(self, index):
+        return self._contents[index]
+
+    def caused_by(self, exception_cls, index=None, include_retry=False):
+        """Checks if the exception class provided caused the failures.
+
+        If the index is not provided, then all outcomes are iterated over.
+
+        NOTE(harlowja): only if ``include_retry`` is provided as true (defaults
+                        to false) will the potential retries own failure be
+                        checked against as well.
+        """
+        for (name, failure) in self.outcomes_iter(index=index):
+            if failure.check(exception_cls):
+                return True
+        if include_retry and self._failure is not None:
+            if self._failure.check(exception_cls):
+                return True
+        return False
+
+    def __iter__(self):
+        """Iterates over the raw contents of this history object."""
+        return iter(self._contents)
 
 
 @six.add_metaclass(abc.ABCMeta)
-class Retry(atom.Atom, Decider):
+class Retry(atom.Atom):
     """A class that can decide how to resolve execution failures.
 
     This abstract base class is used to inherit from and provide different
     strategies that will be activated upon execution failures. Since a retry
-    object is an atom it may also provide execute and revert methods to alter
-    the inputs of connected atoms (depending on the desired strategy to be
-    used this can be quite useful).
+    object is an atom it may also provide :meth:`.execute` and
+    :meth:`.revert` methods to alter the inputs of connected atoms (depending
+    on the desired strategy to be used this can be quite useful).
+
+    NOTE(harlowja): the :meth:`.execute` and :meth:`.revert` and
+    :meth:`.on_failure` will automatically be given a ``history`` parameter,
+    which contains information about the past decisions and outcomes
+    that have occurred (if available).
     """
 
     default_provides = None
@@ -80,7 +126,7 @@ class Retry(atom.Atom, Decider):
             provides = self.default_provides
         super(Retry, self).__init__(name, provides)
         self._build_arg_mapping(self.execute, requires, rebind, auto_extract,
-                                ignore_list=['history'])
+                                ignore_list=[EXECUTE_REVERT_HISTORY])
 
     @property
     def name(self):
@@ -92,11 +138,11 @@ class Retry(atom.Atom, Decider):
 
     @abc.abstractmethod
     def execute(self, history, *args, **kwargs):
-        """Executes the given retry atom.
+        """Executes the given retry.
 
         This execution activates a given retry which will typically produce
         data required to start or restart a connected component using
-        previously provided values and a history of prior failures from
+        previously provided values and a ``history`` of prior failures from
         previous runs. The historical data can be analyzed to alter the
         resolution strategy that this retry controller will use.
 
@@ -105,12 +151,15 @@ class Retry(atom.Atom, Decider):
         saved to the history of the retry atom automatically, that is a list of
         tuples (result, failures) are persisted where failures is a dictionary
         of failures indexed by task names and the result is the execution
-        result returned by this retry controller during that failure resolution
+        result returned by this retry during that failure resolution
         attempt.
+
+        :param args: positional arguments that retry requires to execute.
+        :param kwargs: any keyword arguments that retry requires to execute.
         """
 
     def revert(self, history, *args, **kwargs):
-        """Reverts this retry using the given context.
+        """Reverts this retry.
 
         On revert call all results that had been provided by previous tries
         and all errors caused during reversion are provided. This method
@@ -118,6 +167,29 @@ class Retry(atom.Atom, Decider):
         retry (that is to say that the controller has ran out of resolution
         options and has either given up resolution or has failed to handle
         a execution failure).
+
+        :param args: positional arguments that the retry required to execute.
+        :param kwargs: any keyword arguments that the retry required to
+                       execute.
+        """
+
+    @abc.abstractmethod
+    def on_failure(self, history, *args, **kwargs):
+        """Makes a decision about the future.
+
+        This method will typically use information about prior failures (if
+        this historical failure information is not available or was not
+        persisted the provided history will be empty).
+
+        Returns a retry constant (one of):
+
+        * ``RETRY``: when the controlling flow must be reverted and restarted
+          again (for example with new parameters).
+        * ``REVERT``: when this controlling flow must be completely reverted
+          and the parent flow (if any) should make a decision about further
+          flow execution.
+        * ``REVERT_ALL``: when this controlling flow and the parent
+          flow (if any) must be reverted and marked as a ``FAILURE``.
         """
 
 
@@ -166,8 +238,7 @@ class ForEachBase(Retry):
         # Fetches the next resolution result to try, removes overlapping
         # entries with what has already been tried and then returns the first
         # resolution strategy remaining.
-        items = (item for item, _failures in history)
-        remaining = misc.sequence_minus(values, items)
+        remaining = misc.sequence_minus(values, history.provided_iter())
         if not remaining:
             raise exc.NotFound("No elements left in collection of iterable "
                                "retry controller %s" % self.name)

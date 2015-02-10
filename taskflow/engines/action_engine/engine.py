@@ -14,21 +14,24 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import contextlib
 import threading
+
+from concurrent import futures
+from oslo_utils import excutils
+import six
 
 from taskflow.engines.action_engine import compiler
 from taskflow.engines.action_engine import executor
 from taskflow.engines.action_engine import runtime
 from taskflow.engines import base
 from taskflow import exceptions as exc
-from taskflow.openstack.common import excutils
-from taskflow import retry
 from taskflow import states
 from taskflow import storage as atom_storage
+from taskflow.types import failure
 from taskflow.utils import lock_utils
 from taskflow.utils import misc
-from taskflow.utils import reflection
 
 
 @contextlib.contextmanager
@@ -41,7 +44,7 @@ def _start_stop(executor):
         executor.stop()
 
 
-class ActionEngine(base.EngineBase):
+class ActionEngine(base.Engine):
     """Generic action-based engine.
 
     This engine compiles the flow (and any subflows) into a compilation unit
@@ -57,19 +60,15 @@ class ActionEngine(base.EngineBase):
     the tasks and flow being ran can go through.
     """
     _compiler_factory = compiler.PatternCompiler
-    _task_executor_factory = executor.SerialTaskExecutor
 
-    def __init__(self, flow, flow_detail, backend, conf):
-        super(ActionEngine, self).__init__(flow, flow_detail, backend, conf)
+    def __init__(self, flow, flow_detail, backend, options):
+        super(ActionEngine, self).__init__(flow, flow_detail, backend, options)
         self._runtime = None
         self._compiled = False
         self._compilation = None
         self._lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._storage_ensured = False
-
-    def __str__(self):
-        return "%s: %s" % (reflection.get_class_name(self), id(self))
 
     def suspend(self):
         if not self._compiled:
@@ -129,7 +128,7 @@ class ActionEngine(base.EngineBase):
                 closed = False
                 for (last_state, failures) in runner.run_iter(timeout=timeout):
                     if failures:
-                        misc.Failure.reraise_if_any(failures)
+                        failure.Failure.reraise_if_any(failures)
                     if closed:
                         continue
                     try:
@@ -152,7 +151,7 @@ class ActionEngine(base.EngineBase):
                     self._change_state(last_state)
                     if last_state not in [states.SUSPENDED, states.SUCCESS]:
                         failures = self.storage.get_failures()
-                        misc.Failure.reraise_if_any(failures.values())
+                        failure.Failure.reraise_if_any(failures.values())
 
     def _change_state(self, state):
         with self._state_lock:
@@ -169,19 +168,11 @@ class ActionEngine(base.EngineBase):
         self.notifier.notify(state, details)
 
     def _ensure_storage(self):
-        # NOTE(harlowja): signal to the tasks that exist that we are about to
-        # resume, if they have a previous state, they will now transition to
-        # a resuming state (and then to suspended).
-        self._change_state(states.RESUMING)  # does nothing in PENDING state
+        """Ensure all contained atoms exist in the storage unit."""
         for node in self._compilation.execution_graph.nodes_iter():
-            version = misc.get_version_string(node)
-            if isinstance(node, retry.Retry):
-                self.storage.ensure_retry(node.name, version, node.save_as)
-            else:
-                self.storage.ensure_task(node.name, version, node.save_as)
+            self.storage.ensure_atom(node)
             if node.inject:
                 self.storage.inject_atom_args(node.name, node.inject)
-        self._change_state(states.SUSPENDED)  # does nothing in PENDING state
 
     @lock_utils.locked
     def prepare(self):
@@ -189,7 +180,12 @@ class ActionEngine(base.EngineBase):
             raise exc.InvalidState("Can not prepare an engine"
                                    " which has not been compiled")
         if not self._storage_ensured:
+            # Set our own state to resuming -> (ensure atoms exist
+            # in storage) -> suspended in the storage unit and notify any
+            # attached listeners of these changes.
+            self._change_state(states.RESUMING)
             self._ensure_storage()
+            self._change_state(states.SUSPENDED)
             self._storage_ensured = True
         # At this point we can check to ensure all dependencies are either
         # flow/task provided or storage provided, if there are still missing
@@ -205,41 +201,161 @@ class ActionEngine(base.EngineBase):
             self._change_state(states.PENDING)
 
     @misc.cachedproperty
-    def _task_executor(self):
-        return self._task_executor_factory()
-
-    @misc.cachedproperty
     def _compiler(self):
-        return self._compiler_factory()
+        return self._compiler_factory(self._flow)
 
     @lock_utils.locked
     def compile(self):
         if self._compiled:
             return
-        self._compilation = self._compiler.compile(self._flow)
+        self._compilation = self._compiler.compile()
         self._runtime = runtime.Runtime(self._compilation,
                                         self.storage,
-                                        self.task_notifier,
+                                        self.atom_notifier,
                                         self._task_executor)
         self._compiled = True
 
 
-class SingleThreadedActionEngine(ActionEngine):
+class SerialActionEngine(ActionEngine):
     """Engine that runs tasks in serial manner."""
     _storage_factory = atom_storage.SingleThreadedStorage
 
+    def __init__(self, flow, flow_detail, backend, options):
+        super(SerialActionEngine, self).__init__(flow, flow_detail,
+                                                 backend, options)
+        self._task_executor = executor.SerialTaskExecutor()
 
-class MultiThreadedActionEngine(ActionEngine):
-    """Engine that runs tasks in parallel manner."""
+
+class _ExecutorTypeMatch(collections.namedtuple('_ExecutorTypeMatch',
+                                                ['types', 'executor_cls'])):
+    def matches(self, executor):
+        return isinstance(executor, self.types)
+
+
+class _ExecutorTextMatch(collections.namedtuple('_ExecutorTextMatch',
+                                                ['strings', 'executor_cls'])):
+    def matches(self, text):
+        return text.lower() in self.strings
+
+
+class ParallelActionEngine(ActionEngine):
+    """Engine that runs tasks in parallel manner.
+
+    Supported keyword arguments:
+
+    * ``executor``: a object that implements a :pep:`3148` compatible executor
+      interface; it will be used for scheduling tasks. The following
+      type are applicable (other unknown types passed will cause a type
+      error to be raised).
+
+=========================  ===============================================
+Type provided              Executor used
+=========================  ===============================================
+|cft|.ThreadPoolExecutor   :class:`~.executor.ParallelThreadTaskExecutor`
+|cfp|.ProcessPoolExecutor  :class:`~.executor.ParallelProcessTaskExecutor`
+|cf|._base.Executor        :class:`~.executor.ParallelThreadTaskExecutor`
+=========================  ===============================================
+
+    * ``executor``: a string that will be used to select a :pep:`3148`
+      compatible executor; it will be used for scheduling tasks. The following
+      string are applicable (other unknown strings passed will cause a value
+      error to be raised).
+
+===========================  ===============================================
+String (case insensitive)    Executor used
+===========================  ===============================================
+``process``                  :class:`~.executor.ParallelProcessTaskExecutor`
+``processes``                :class:`~.executor.ParallelProcessTaskExecutor`
+``thread``                   :class:`~.executor.ParallelThreadTaskExecutor`
+``threaded``                 :class:`~.executor.ParallelThreadTaskExecutor`
+``threads``                  :class:`~.executor.ParallelThreadTaskExecutor`
+===========================  ===============================================
+
+    .. |cfp| replace:: concurrent.futures.process
+    .. |cft| replace:: concurrent.futures.thread
+    .. |cf| replace:: concurrent.futures
+    """
+
     _storage_factory = atom_storage.MultiThreadedStorage
 
-    def _task_executor_factory(self):
-        return executor.ParallelTaskExecutor(executor=self._executor,
-                                             max_workers=self._max_workers)
+    # One of these types should match when a object (non-string) is provided
+    # for the 'executor' option.
+    #
+    # NOTE(harlowja): the reason we use the library/built-in futures is to
+    # allow for instances of that to be detected and handled correctly, instead
+    # of forcing everyone to use our derivatives...
+    _executor_cls_matchers = [
+        _ExecutorTypeMatch((futures.ThreadPoolExecutor,),
+                           executor.ParallelThreadTaskExecutor),
+        _ExecutorTypeMatch((futures.ProcessPoolExecutor,),
+                           executor.ParallelProcessTaskExecutor),
+        _ExecutorTypeMatch((futures.Executor,),
+                           executor.ParallelThreadTaskExecutor),
+    ]
 
-    def __init__(self, flow, flow_detail, backend, conf,
-                 executor=None, max_workers=None):
-        super(MultiThreadedActionEngine, self).__init__(
-            flow, flow_detail, backend, conf)
-        self._executor = executor
-        self._max_workers = max_workers
+    # One of these should match when a string/text is provided for the
+    # 'executor' option (a mixed case equivalent is allowed since the match
+    # will be lower-cased before checking).
+    _executor_str_matchers = [
+        _ExecutorTextMatch(frozenset(['processes', 'process']),
+                           executor.ParallelProcessTaskExecutor),
+        _ExecutorTextMatch(frozenset(['thread', 'threads', 'threaded']),
+                           executor.ParallelThreadTaskExecutor),
+    ]
+
+    # Used when no executor is provided (either a string or object)...
+    _default_executor_cls = executor.ParallelThreadTaskExecutor
+
+    def __init__(self, flow, flow_detail, backend, options):
+        super(ParallelActionEngine, self).__init__(flow, flow_detail,
+                                                   backend, options)
+        # This ensures that any provided executor will be validated before
+        # we get to far in the compilation/execution pipeline...
+        self._task_executor = self._fetch_task_executor(self._options)
+
+    @classmethod
+    def _fetch_task_executor(cls, options):
+        kwargs = {}
+        executor_cls = cls._default_executor_cls
+        # Match the desired executor to a class that will work with it...
+        desired_executor = options.get('executor')
+        if isinstance(desired_executor, six.string_types):
+            matched_executor_cls = None
+            for m in cls._executor_str_matchers:
+                if m.matches(desired_executor):
+                    matched_executor_cls = m.executor_cls
+                    break
+            if matched_executor_cls is None:
+                expected = set()
+                for m in cls._executor_str_matchers:
+                    expected.update(m.strings)
+                raise ValueError("Unknown executor string '%s' expected"
+                                 " one of %s (or mixed case equivalent)"
+                                 % (desired_executor, list(expected)))
+            else:
+                executor_cls = matched_executor_cls
+        elif desired_executor is not None:
+            matched_executor_cls = None
+            for m in cls._executor_cls_matchers:
+                if m.matches(desired_executor):
+                    matched_executor_cls = m.executor_cls
+                    break
+            if matched_executor_cls is None:
+                expected = set()
+                for m in cls._executor_cls_matchers:
+                    expected.update(m.types)
+                raise TypeError("Unknown executor '%s' (%s) expected an"
+                                " instance of %s" % (desired_executor,
+                                                     type(desired_executor),
+                                                     list(expected)))
+            else:
+                executor_cls = matched_executor_cls
+                kwargs['executor'] = desired_executor
+        for k in getattr(executor_cls, 'OPTIONS', []):
+            if k == 'executor':
+                continue
+            try:
+                kwargs[k] = options[k]
+            except KeyError:
+                pass
+        return executor_cls(**kwargs)

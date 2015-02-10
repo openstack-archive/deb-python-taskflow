@@ -16,25 +16,28 @@
 
 import contextlib
 import string
-import threading
 
 import six
 
 from taskflow import exceptions
+from taskflow.listeners import base as listener_base
 from taskflow.persistence.backends import impl_memory
 from taskflow import retry
 from taskflow import task
+from taskflow.types import failure
 from taskflow.utils import kazoo_utils
-from taskflow.utils import misc
+from taskflow.utils import threading_utils
 
 ARGS_KEY = '__args__'
 KWARGS_KEY = '__kwargs__'
 ORDER_KEY = '__order__'
-
 ZK_TEST_CONFIG = {
     'timeout': 1.0,
     'hosts': ["localhost:2181"],
 }
+# If latches/events take longer than this to become empty/set, something is
+# usually wrong and should be debugged instead of deadlocking...
+WAIT_TIMEOUT = 300
 
 
 @contextlib.contextmanager
@@ -48,7 +51,7 @@ def wrap_all_failures():
     try:
         yield
     except Exception:
-        raise exceptions.WrappedFailure([misc.Failure()])
+        raise exceptions.WrappedFailure([failure.Failure()])
 
 
 def zookeeper_available(min_version, timeout=3):
@@ -68,6 +71,16 @@ def zookeeper_available(min_version, timeout=3):
         return False
     finally:
         kazoo_utils.finalize_client(client)
+
+
+class NoopRetry(retry.AlwaysRevert):
+    pass
+
+
+class NoopTask(task.Task):
+
+    def execute(self):
+        pass
 
 
 class DummyTask(task.Task):
@@ -104,43 +117,71 @@ class ProvidesRequiresTask(task.Task):
             return dict((k, k) for k in self.provides)
 
 
-def task_callback(state, values, details):
-    name = details.get('task_name', None)
-    if not name:
-        name = details.get('retry_name', '<unknown>')
-    values.append('%s %s' % (name, state))
+class CaptureListener(listener_base.Listener):
+    _LOOKUP_NAME_POSTFIX = {
+        'task_name': '.t',
+        'retry_name': '.r',
+        'flow_name': '.f',
+    }
+
+    def __init__(self, engine,
+                 task_listen_for=listener_base.DEFAULT_LISTEN_FOR,
+                 values=None,
+                 capture_flow=True, capture_task=True, capture_retry=True,
+                 skip_tasks=None, skip_retries=None, skip_flows=None):
+        super(CaptureListener, self).__init__(engine,
+                                              task_listen_for=task_listen_for)
+        self._capture_flow = capture_flow
+        self._capture_task = capture_task
+        self._capture_retry = capture_retry
+        self._skip_tasks = skip_tasks or []
+        self._skip_flows = skip_flows or []
+        self._skip_retries = skip_retries or []
+        if values is None:
+            self.values = []
+        else:
+            self.values = values
+
+    def _capture(self, state, details, name_key):
+        name = details[name_key]
+        try:
+            name += self._LOOKUP_NAME_POSTFIX[name_key]
+        except KeyError:
+            pass
+        if 'result' in details:
+            name += ' %s(%s)' % (state, details['result'])
+        else:
+            name += " %s" % state
+        return name
+
+    def _task_receiver(self, state, details):
+        if self._capture_task:
+            if details['task_name'] not in self._skip_tasks:
+                self.values.append(self._capture(state, details, 'task_name'))
+
+    def _retry_receiver(self, state, details):
+        if self._capture_retry:
+            if details['retry_name'] not in self._skip_retries:
+                self.values.append(self._capture(state, details, 'retry_name'))
+
+    def _flow_receiver(self, state, details):
+        if self._capture_flow:
+            if details['flow_name'] not in self._skip_flows:
+                self.values.append(self._capture(state, details, 'flow_name'))
 
 
-def flow_callback(state, values, details):
-    values.append('flow %s' % state)
-
-
-def register_notifiers(engine, values):
-    engine.notifier.register('*', flow_callback, kwargs={'values': values})
-    engine.task_notifier.register('*', task_callback,
-                                  kwargs={'values': values})
-
-
-class SaveOrderTask(task.Task):
-
-    def __init__(self, name=None, *args, **kwargs):
-        super(SaveOrderTask, self).__init__(name=name, *args, **kwargs)
-        self.values = EngineTestBase.values
-
+class ProgressingTask(task.Task):
     def execute(self, **kwargs):
         self.update_progress(0.0)
-        self.values.append(self.name)
         self.update_progress(1.0)
         return 5
 
     def revert(self, **kwargs):
         self.update_progress(0)
-        self.values.append(self.name + ' reverted(%s)'
-                           % kwargs.get('result'))
         self.update_progress(1.0)
 
 
-class FailingTask(SaveOrderTask):
+class FailingTask(ProgressingTask):
     def execute(self, **kwargs):
         self.update_progress(0)
         self.update_progress(0.99)
@@ -161,7 +202,7 @@ class ProgressingTask(task.Task):
         return 5
 
 
-class FailingTaskWithOneArg(SaveOrderTask):
+class FailingTaskWithOneArg(ProgressingTask):
     def execute(self, x, **kwargs):
         raise RuntimeError('Woot with %s' % x)
 
@@ -270,11 +311,8 @@ class NeverRunningTask(task.Task):
 
 
 class EngineTestBase(object):
-    values = None
-
     def setUp(self):
         super(EngineTestBase, self).setUp()
-        EngineTestBase.values = []
         self.backend = impl_memory.MemoryBackend(conf={})
 
     def tearDown(self):
@@ -285,7 +323,9 @@ class EngineTestBase(object):
         super(EngineTestBase, self).tearDown()
 
     def _make_engine(self, flow, **kwargs):
-        raise NotImplementedError()
+        raise exceptions.NotImplementedError("_make_engine() must be"
+                                             " overridden if an engine is"
+                                             " desired")
 
 
 class FailureMatcher(object):
@@ -310,7 +350,7 @@ class OneReturnRetry(retry.AlwaysRevert):
         pass
 
 
-class ConditionalTask(SaveOrderTask):
+class ConditionalTask(ProgressingTask):
 
     def execute(self, x, y):
         super(ConditionalTask, self).execute()
@@ -318,7 +358,7 @@ class ConditionalTask(SaveOrderTask):
             raise RuntimeError('Woot!')
 
 
-class WaitForOneFromTask(SaveOrderTask):
+class WaitForOneFromTask(ProgressingTask):
 
     def __init__(self, name, wait_for, wait_states, **kwargs):
         super(WaitForOneFromTask, self).__init__(name, **kwargs)
@@ -330,16 +370,14 @@ class WaitForOneFromTask(SaveOrderTask):
             self.wait_states = [wait_states]
         else:
             self.wait_states = wait_states
-        self.event = threading.Event()
+        self.event = threading_utils.Event()
 
     def execute(self):
-        # NOTE(imelnikov): if test was not complete within
-        # 5 minutes, something is terribly wrong
-        self.event.wait(300)
-        if not self.event.is_set():
-            raise RuntimeError('Timeout occurred while waiting '
+        if not self.event.wait(WAIT_TIMEOUT):
+            raise RuntimeError('%s second timeout occurred while waiting '
                                'for %s to change state to %s'
-                               % (self.wait_for, self.wait_states))
+                               % (WAIT_TIMEOUT, self.wait_for,
+                                  self.wait_states))
         return super(WaitForOneFromTask, self).execute()
 
     def callback(self, state, details):

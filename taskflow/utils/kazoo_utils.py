@@ -16,10 +16,11 @@
 
 from kazoo import client
 from kazoo import exceptions as k_exc
+from oslo_utils import reflection
 import six
+from six.moves import zip as compat_zip
 
 from taskflow import exceptions as exc
-from taskflow.utils import reflection
 
 
 def _parse_hosts(hosts):
@@ -94,13 +95,17 @@ class KazooTransactionException(k_exc.KazooException):
 
 
 def checked_commit(txn):
-    # Until https://github.com/python-zk/kazoo/pull/224 is fixed we have
-    # to workaround the transaction failing silently.
+    """Commits a kazoo transcation and validates the result.
+
+    NOTE(harlowja): Until https://github.com/python-zk/kazoo/pull/224 is fixed
+    or a similar pull request is merged we have to workaround the transaction
+    failing silently.
+    """
     if not txn.operations:
         return []
     results = txn.commit()
     failures = []
-    for op, result in six.moves.zip(txn.operations, results):
+    for op, result in compat_zip(txn.operations, results):
         if isinstance(result, k_exc.KazooException):
             failures.append((op, result))
     if len(results) < len(txn.operations):
@@ -180,7 +185,8 @@ def make_client(conf):
     hosts = _parse_hosts(conf.get("hosts", "localhost:2181"))
     if not hosts or not isinstance(hosts, six.string_types):
         raise TypeError("Invalid hosts format, expected "
-                        "non-empty string/list, not %s" % type(hosts))
+                        "non-empty string/list, not '%s' (%s)"
+                        % (hosts, type(hosts)))
     client_kwargs['hosts'] = hosts
     if 'timeout' in conf:
         client_kwargs['timeout'] = float(conf['timeout'])

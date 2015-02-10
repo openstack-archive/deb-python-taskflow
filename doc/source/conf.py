@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import datetime
 import os
 import sys
 
@@ -13,7 +14,6 @@ extensions = [
     'sphinx.ext.doctest',
     'sphinx.ext.extlinks',
     'sphinx.ext.inheritance_diagram',
-    'sphinx.ext.intersphinx',
     'sphinx.ext.viewcode',
     'oslosphinx'
 ]
@@ -37,7 +37,7 @@ exclude_patterns = ['_build']
 
 # General information about the project.
 project = u'TaskFlow'
-copyright = u'2013-2014, OpenStack Foundation'
+copyright = u'%s, OpenStack Foundation' % datetime.date.today().year
 source_tree = 'http://git.openstack.org/cgit/openstack/taskflow/tree'
 
 # If true, '()' will be appended to :func: etc. cross-reference text.
@@ -56,6 +56,7 @@ modindex_common_prefix = ['taskflow.']
 # Shortened external links.
 extlinks = {
     'example': (source_tree + '/taskflow/examples/%s.py', ''),
+    'pybug': ('http://bugs.python.org/issue%s', ''),
 }
 
 # -- Options for HTML output --------------------------------------------------
@@ -81,9 +82,6 @@ latex_documents = [
      '%s Documentation' % project,
      'OpenStack Foundation', 'manual'),
 ]
-
-# Example configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {'http://docs.python.org/': None}
 
 # -- Options for autoddoc ----------------------------------------------------
 

@@ -19,7 +19,6 @@ import logging
 import os
 import sys
 import tempfile
-import threading
 
 top_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),
                                        os.pardir,
@@ -30,6 +29,7 @@ from taskflow import engines
 from taskflow.engines.worker_based import worker
 from taskflow.patterns import linear_flow as lf
 from taskflow.tests import utils
+from taskflow.utils import threading_utils
 
 import example_utils  # noqa
 
@@ -53,7 +53,12 @@ USE_FILESYSTEM = False
 BASE_SHARED_CONF = {
     'exchange': 'taskflow',
 }
-WORKERS = 2
+
+# Until https://github.com/celery/kombu/issues/398 is resolved it is not
+# recommended to run many worker threads in this example due to the types
+# of errors mentioned in that issue.
+MEMORY_WORKERS = 2
+FILE_WORKERS = 1
 WORKER_CONF = {
     # These are the tasks the worker can execute, they *must* be importable,
     # typically this list is used to restrict what workers may execute to
@@ -64,19 +69,16 @@ WORKER_CONF = {
         'taskflow.tests.utils:TaskMultiArgOneReturn'
     ],
 }
-ENGINE_CONF = {
-    'engine': 'worker-based',
-}
 
 
-def run(engine_conf):
+def run(engine_options):
     flow = lf.Flow('simple-linear').add(
         utils.TaskOneArgOneReturn(provides='result1'),
         utils.TaskMultiArgOneReturn(provides='result2')
     )
     eng = engines.load(flow,
                        store=dict(x=111, y=222, z=333),
-                       engine_conf=engine_conf)
+                       engine='worker-based', **engine_options)
     eng.run()
     return eng.storage.fetch_all()
 
@@ -90,6 +92,7 @@ if __name__ == "__main__":
 
     tmp_path = None
     if USE_FILESYSTEM:
+        worker_count = FILE_WORKERS
         tmp_path = tempfile.mkdtemp(prefix='wbe-example-')
         shared_conf.update({
             'transport': 'filesystem',
@@ -100,6 +103,7 @@ if __name__ == "__main__":
             },
         })
     else:
+        worker_count = MEMORY_WORKERS
         shared_conf.update({
             'transport': 'memory',
             'transport_options': {
@@ -108,28 +112,26 @@ if __name__ == "__main__":
         })
     worker_conf = dict(WORKER_CONF)
     worker_conf.update(shared_conf)
-    engine_conf = dict(ENGINE_CONF)
-    engine_conf.update(shared_conf)
+    engine_options = dict(shared_conf)
     workers = []
     worker_topics = []
 
     try:
         # Create a set of workers to simulate actual remote workers.
-        print('Running %s workers.' % (WORKERS))
-        for i in range(0, WORKERS):
+        print('Running %s workers.' % (worker_count))
+        for i in range(0, worker_count):
             worker_conf['topic'] = 'worker-%s' % (i + 1)
             worker_topics.append(worker_conf['topic'])
             w = worker.Worker(**worker_conf)
-            runner = threading.Thread(target=w.run)
-            runner.daemon = True
+            runner = threading_utils.daemon_thread(w.run)
             runner.start()
             w.wait()
             workers.append((runner, w.stop))
 
         # Now use those workers to do something.
         print('Executing some work.')
-        engine_conf['topics'] = worker_topics
-        result = run(engine_conf)
+        engine_options['topics'] = worker_topics
+        result = run(engine_options)
         print('Execution finished.')
         # This is done so that the test examples can work correctly
         # even when the keys change order (which will happen in various

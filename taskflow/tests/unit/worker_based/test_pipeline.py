@@ -14,17 +14,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import threading
-
 from concurrent import futures
+from oslo_utils import uuidutils
 
+from taskflow.engines.action_engine import executor as base_executor
 from taskflow.engines.worker_based import endpoint
 from taskflow.engines.worker_based import executor as worker_executor
 from taskflow.engines.worker_based import server as worker_server
-from taskflow.openstack.common import uuidutils
 from taskflow import test
 from taskflow.tests import utils as test_utils
-from taskflow.utils import misc
+from taskflow.types import failure
+from taskflow.utils import threading_utils
 
 
 TEST_EXCHANGE, TEST_TOPIC = ('test-exchange', 'test-topic')
@@ -32,7 +32,7 @@ WAIT_TIMEOUT = 1.0
 POLLING_INTERVAL = 0.01
 
 
-class TestPipeline(test.MockTestCase):
+class TestPipeline(test.TestCase):
     def _fetch_server(self, task_classes):
         endpoints = []
         for cls in task_classes:
@@ -44,8 +44,7 @@ class TestPipeline(test.MockTestCase):
             transport_options={
                 'polling_interval': POLLING_INTERVAL,
             })
-        server_thread = threading.Thread(target=server.start)
-        server_thread.daemon = True
+        server_thread = threading_utils.daemon_thread(server.start)
         return (server, server_thread)
 
     def _fetch_executor(self):
@@ -75,13 +74,14 @@ class TestPipeline(test.MockTestCase):
         self.assertEqual(0, executor.wait_for_workers(timeout=WAIT_TIMEOUT))
 
         t = test_utils.TaskOneReturn()
-        f = executor.execute_task(t, uuidutils.generate_uuid(), {})
+        progress_callback = lambda *args, **kwargs: None
+        f = executor.execute_task(t, uuidutils.generate_uuid(), {},
+                                  progress_callback=progress_callback)
         executor.wait_for_any([f])
 
-        t2, _action, result = f.result()
-
+        event, result = f.result()
         self.assertEqual(1, result)
-        self.assertEqual(t, t2)
+        self.assertEqual(base_executor.EXECUTED, event)
 
     def test_execution_failure_pipeline(self):
         task_classes = [
@@ -90,9 +90,12 @@ class TestPipeline(test.MockTestCase):
         executor, server = self._start_components(task_classes)
 
         t = test_utils.TaskWithFailure()
-        f = executor.execute_task(t, uuidutils.generate_uuid(), {})
+        progress_callback = lambda *args, **kwargs: None
+        f = executor.execute_task(t, uuidutils.generate_uuid(), {},
+                                  progress_callback=progress_callback)
         executor.wait_for_any([f])
 
-        _t2, _action, result = f.result()
-        self.assertIsInstance(result, misc.Failure)
+        action, result = f.result()
+        self.assertIsInstance(result, failure.Failure)
         self.assertEqual(RuntimeError, result.check(RuntimeError))
+        self.assertEqual(base_executor.EXECUTED, action)

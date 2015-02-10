@@ -14,13 +14,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
+from oslo_utils import reflection
+import six
 
 from taskflow.engines.worker_based import endpoint
 from taskflow.engines.worker_based import worker
 from taskflow import test
+from taskflow.test import mock
 from taskflow.tests import utils
-from taskflow.utils import reflection
 
 
 class TestWorker(test.MockTestCase):
@@ -36,13 +37,13 @@ class TestWorker(test.MockTestCase):
         self.endpoint_count = 21
 
         # patch classes
-        self.executor_mock, self.executor_inst_mock = self._patch_class(
+        self.executor_mock, self.executor_inst_mock = self.patchClass(
             worker.futures, 'ThreadPoolExecutor', attach_as='executor')
-        self.server_mock, self.server_inst_mock = self._patch_class(
+        self.server_mock, self.server_inst_mock = self.patchClass(
             worker.server, 'Server')
 
         # other mocking
-        self.threads_count_mock = self._patch(
+        self.threads_count_mock = self.patch(
             'taskflow.engines.worker_based.worker.tu.get_optimal_thread_count')
         self.threads_count_mock.return_value = self.threads_count
 
@@ -54,7 +55,7 @@ class TestWorker(test.MockTestCase):
         worker_kwargs.update(kwargs)
         w = worker.Worker(**worker_kwargs)
         if reset_master_mock:
-            self._reset_master_mock()
+            self.resetMasterMock()
         return w
 
     def test_creation(self):
@@ -63,9 +64,21 @@ class TestWorker(test.MockTestCase):
         master_mock_calls = [
             mock.call.executor_class(self.threads_count),
             mock.call.Server(self.topic, self.exchange,
-                             self.executor_inst_mock, [], url=self.broker_url)
+                             self.executor_inst_mock, [],
+                             url=self.broker_url,
+                             transport_options=mock.ANY,
+                             transport=mock.ANY,
+                             retry_options=mock.ANY)
         ]
         self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
+
+    def test_banner_writing(self):
+        buf = six.StringIO()
+        w = self.worker()
+        w.run(banner_writer=buf.write)
+        w.wait()
+        w.stop()
+        self.assertGreater(0, len(buf.getvalue()))
 
     def test_creation_with_custom_threads_count(self):
         self.worker(threads_count=10)
@@ -73,12 +86,13 @@ class TestWorker(test.MockTestCase):
         master_mock_calls = [
             mock.call.executor_class(10),
             mock.call.Server(self.topic, self.exchange,
-                             self.executor_inst_mock, [], url=self.broker_url)
+                             self.executor_inst_mock, [],
+                             url=self.broker_url,
+                             transport_options=mock.ANY,
+                             transport=mock.ANY,
+                             retry_options=mock.ANY)
         ]
         self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
-
-    def test_creation_with_negative_threads_count(self):
-        self.assertRaises(ValueError, self.worker, threads_count=-10)
 
     def test_creation_with_custom_executor(self):
         executor_mock = mock.MagicMock(name='executor')
@@ -86,7 +100,10 @@ class TestWorker(test.MockTestCase):
 
         master_mock_calls = [
             mock.call.Server(self.topic, self.exchange, executor_mock, [],
-                             url=self.broker_url)
+                             url=self.broker_url,
+                             transport_options=mock.ANY,
+                             transport=mock.ANY,
+                             retry_options=mock.ANY)
         ]
         self.assertEqual(self.master_mock.mock_calls, master_mock_calls)
 

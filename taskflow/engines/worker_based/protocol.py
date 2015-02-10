@@ -15,21 +15,21 @@
 #    under the License.
 
 import abc
-import logging
 import threading
 
 from concurrent import futures
 import jsonschema
 from jsonschema import exceptions as schema_exc
+from oslo_utils import reflection
+from oslo_utils import timeutils
 import six
 
 from taskflow.engines.action_engine import executor
 from taskflow import exceptions as excp
-from taskflow.openstack.common import timeutils
+from taskflow import logging
+from taskflow.types import failure as ft
 from taskflow.types import timing as tt
 from taskflow.utils import lock_utils
-from taskflow.utils import misc
-from taskflow.utils import reflection
 
 # NOTE(skudriashev): This is protocol states and events, which are not
 # related to task states.
@@ -38,14 +38,14 @@ PENDING = 'PENDING'
 RUNNING = 'RUNNING'
 SUCCESS = 'SUCCESS'
 FAILURE = 'FAILURE'
-PROGRESS = 'PROGRESS'
+EVENT = 'EVENT'
 
 # During these states the expiry is active (once out of these states the expiry
 # no longer matters, since we have no way of knowing how long a task will run
 # for).
 WAITING_STATES = (WAITING, PENDING)
 
-_ALL_STATES = (WAITING, PENDING, RUNNING, SUCCESS, FAILURE, PROGRESS)
+_ALL_STATES = (WAITING, PENDING, RUNNING, SUCCESS, FAILURE, EVENT)
 _STOP_TIMER_STATES = (RUNNING, SUCCESS, FAILURE)
 
 # Transitions that a request state can go through.
@@ -121,12 +121,16 @@ class Message(object):
 
 class Notify(Message):
     """Represents notify message type."""
+
+    #: String constant representing this message type.
     TYPE = NOTIFY
 
     # NOTE(harlowja): the executor (the entity who initially requests a worker
     # to send back a notification response) schema is different than the
     # worker response schema (that's why there are two schemas here).
-    _RESPONSE_SCHEMA = {
+
+    #: Expected notify *response* message schema (in json schema format).
+    RESPONSE_SCHEMA = {
         "type": "object",
         'properties': {
             'topic': {
@@ -142,7 +146,9 @@ class Notify(Message):
         "required": ["topic", 'tasks'],
         "additionalProperties": False,
     }
-    _SENDER_SCHEMA = {
+
+    #: Expected *sender* request message schema (in json schema format).
+    SENDER_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
     }
@@ -156,9 +162,9 @@ class Notify(Message):
     @classmethod
     def validate(cls, data, response):
         if response:
-            schema = cls._RESPONSE_SCHEMA
+            schema = cls.RESPONSE_SCHEMA
         else:
-            schema = cls._SENDER_SCHEMA
+            schema = cls.SENDER_SCHEMA
         try:
             jsonschema.validate(data, schema, types=_SCHEMA_TYPES)
         except schema_exc.ValidationError as e:
@@ -180,8 +186,11 @@ class Request(Message):
     states.
     """
 
+    #: String constant representing this message type.
     TYPE = REQUEST
-    _SCHEMA = {
+
+    #: Expected message schema (in json schema format).
+    SCHEMA = {
         "type": "object",
         'properties': {
             # These two are typically only sent on revert actions (that is
@@ -219,29 +228,36 @@ class Request(Message):
         'required': ['task_cls', 'task_name', 'task_version', 'action'],
     }
 
-    def __init__(self, task, uuid, action, arguments, progress_callback,
-                 timeout, **kwargs):
+    def __init__(self, task, uuid, action, arguments, timeout, **kwargs):
         self._task = task
-        self._task_cls = reflection.get_class_name(task)
         self._uuid = uuid
         self._action = action
         self._event = ACTION_TO_EVENT[action]
         self._arguments = arguments
-        self._progress_callback = progress_callback
         self._kwargs = kwargs
         self._watch = tt.StopWatch(duration=timeout).start()
         self._state = WAITING
         self._lock = threading.Lock()
         self._created_on = timeutils.utcnow()
-        self.result = futures.Future()
+        self._result = futures.Future()
+        self._result.atom = task
+        self._notifier = task.notifier
+
+    @property
+    def result(self):
+        return self._result
+
+    @property
+    def notifier(self):
+        return self._notifier
 
     @property
     def uuid(self):
         return self._uuid
 
     @property
-    def task_cls(self):
-        return self._task_cls
+    def task(self):
+        return self._task
 
     @property
     def state(self):
@@ -270,15 +286,19 @@ class Request(Message):
         """Return json-serializable request.
 
         To convert requests that have failed due to some exception this will
-        convert all `misc.Failure` objects into dictionaries (which will then
-        be reconstituted by the receiver).
+        convert all `failure.Failure` objects into dictionaries (which will
+        then be reconstituted by the receiver).
         """
-        request = dict(task_cls=self._task_cls, task_name=self._task.name,
-                       task_version=self._task.version, action=self._action,
-                       arguments=self._arguments)
+        request = {
+            'task_cls': reflection.get_class_name(self._task),
+            'task_name': self._task.name,
+            'task_version': self._task.version,
+            'action': self._action,
+            'arguments': self._arguments,
+        }
         if 'result' in self._kwargs:
             result = self._kwargs['result']
-            if isinstance(result, misc.Failure):
+            if isinstance(result, ft.Failure):
                 request['result'] = ('failure', result.to_dict())
             else:
                 request['result'] = ('success', result)
@@ -290,10 +310,7 @@ class Request(Message):
         return request
 
     def set_result(self, result):
-        self.result.set_result((self._task, self._event, result))
-
-    def on_progress(self, event_data, progress):
-        self._progress_callback(self._task, event_data, progress)
+        self.result.set_result((self._event, result))
 
     def transition_and_log_error(self, new_state, logger=None):
         """Transitions *and* logs an error if that transitioning raises.
@@ -341,7 +358,7 @@ class Request(Message):
     @classmethod
     def validate(cls, data):
         try:
-            jsonschema.validate(data, cls._SCHEMA, types=_SCHEMA_TYPES)
+            jsonschema.validate(data, cls.SCHEMA, types=_SCHEMA_TYPES)
         except schema_exc.ValidationError as e:
             raise excp.InvalidFormat("%s message response data not of the"
                                      " expected format: %s"
@@ -350,8 +367,12 @@ class Request(Message):
 
 class Response(Message):
     """Represents response message type."""
+
+    #: String constant representing this message type.
     TYPE = RESPONSE
-    _SCHEMA = {
+
+    #: Expected message schema (in json schema format).
+    SCHEMA = {
         "type": "object",
         'properties': {
             'state': {
@@ -361,7 +382,7 @@ class Response(Message):
             'data': {
                 "anyOf": [
                     {
-                        "$ref": "#/definitions/progress",
+                        "$ref": "#/definitions/event",
                     },
                     {
                         "$ref": "#/definitions/completion",
@@ -375,17 +396,17 @@ class Response(Message):
         "required": ["state", 'data'],
         "additionalProperties": False,
         "definitions": {
-            "progress": {
+            "event": {
                 "type": "object",
                 "properties": {
-                    'progress': {
-                        'type': 'number',
+                    'event_type': {
+                        'type': 'string',
                     },
-                    'event_data': {
+                    'details': {
                         'type': 'object',
                     },
                 },
-                "required": ["progress", 'event_data'],
+                "required": ["event_type", 'details'],
                 "additionalProperties": False,
             },
             # Used when sending *only* request state changes (and no data is
@@ -417,7 +438,7 @@ class Response(Message):
         state = data['state']
         data = data['data']
         if state == FAILURE and 'result' in data:
-            data['result'] = misc.Failure.from_dict(data['result'])
+            data['result'] = ft.Failure.from_dict(data['result'])
         return cls(state, **data)
 
     @property
@@ -434,7 +455,7 @@ class Response(Message):
     @classmethod
     def validate(cls, data):
         try:
-            jsonschema.validate(data, cls._SCHEMA, types=_SCHEMA_TYPES)
+            jsonschema.validate(data, cls.SCHEMA, types=_SCHEMA_TYPES)
         except schema_exc.ValidationError as e:
             raise excp.InvalidFormat("%s message response data not of the"
                                      " expected format: %s"
