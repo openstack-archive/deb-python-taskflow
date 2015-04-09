@@ -15,6 +15,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import abc
+
 from oslo_utils import reflection
 import six
 
@@ -82,35 +84,56 @@ def _build_arg_mapping(atom_name, reqs, rebind_args, function, do_infer,
     well as verify that the final argument mapping does not have missing or
     extra arguments (where applicable).
     """
-    atom_args = reflection.get_callable_args(function, required_only=True)
+
+    # build a list of required arguments based on function signature
+    req_args = reflection.get_callable_args(function, required_only=True)
+    all_args = reflection.get_callable_args(function, required_only=False)
+
+    # remove arguments that are part of ignore_list
     if ignore_list:
         for arg in ignore_list:
-            if arg in atom_args:
-                atom_args.remove(arg)
+            if arg in req_args:
+                req_args.remove(arg)
+    else:
+        ignore_list = []
 
-    result = {}
+    required = {}
+    # add reqs to required mappings
     if reqs:
-        result.update((a, a) for a in reqs)
+        if isinstance(reqs, six.string_types):
+            required.update({reqs: reqs})
+        else:
+            required.update((a, a) for a in reqs)
+
+    # add req_args to required mappings if do_infer is set
     if do_infer:
-        result.update((a, a) for a in atom_args)
-    result.update(_build_rebind_dict(atom_args, rebind_args))
+        required.update((a, a) for a in req_args)
+
+    # update required mappings based on rebind_args
+    required.update(_build_rebind_dict(req_args, rebind_args))
+
+    if do_infer:
+        opt_args = set(all_args) - set(required) - set(ignore_list)
+        optional = dict((a, a) for a in opt_args)
+    else:
+        optional = {}
 
     if not reflection.accepts_kwargs(function):
-        all_args = reflection.get_callable_args(function, required_only=False)
-        extra_args = set(result) - set(all_args)
+        extra_args = set(required) - set(all_args)
         if extra_args:
             extra_args_str = ', '.join(sorted(extra_args))
             raise ValueError('Extra arguments given to atom %s: %s'
                              % (atom_name, extra_args_str))
 
     # NOTE(imelnikov): don't use set to preserve order in error message
-    missing_args = [arg for arg in atom_args if arg not in result]
+    missing_args = [arg for arg in req_args if arg not in required]
     if missing_args:
         raise ValueError('Missing arguments for atom %s: %s'
                          % (atom_name, ' ,'.join(missing_args)))
-    return result
+    return required, optional
 
 
+@six.add_metaclass(abc.ABCMeta)
 class Atom(object):
     """An abstract flow atom that causes a flow to progress (in some manner).
 
@@ -146,6 +169,13 @@ class Atom(object):
                   commences (this allows for providing atom *local* values that
                   do not need to be provided by other atoms/dependents).
     :ivar inject: See parameter ``inject``.
+    :ivar requires: Any inputs this atom requires to function (if applicable).
+                    NOTE(harlowja): there can be no intersection between what
+                    this atom requires and what it produces (since this would
+                    be an impossible dependency to satisfy).
+    :ivar optional: Any inputs that are optional for this atom's execute
+                    method.
+
     """
 
     def __init__(self, name=None, provides=None, inject=None):
@@ -153,17 +183,41 @@ class Atom(object):
         self.save_as = _save_as_to_mapping(provides)
         self.version = (1, 0)
         self.inject = inject
+        self.requires = frozenset()
+        self.optional = frozenset()
 
     def _build_arg_mapping(self, executor, requires=None, rebind=None,
                            auto_extract=True, ignore_list=None):
-        self.rebind = _build_arg_mapping(self.name, requires, rebind,
-                                         executor, auto_extract, ignore_list)
+        req_arg, opt_arg = _build_arg_mapping(self.name, requires, rebind,
+                                              executor, auto_extract,
+                                              ignore_list)
+
+        self.rebind = {}
+        if opt_arg:
+            self.rebind.update(opt_arg)
+        if req_arg:
+            self.rebind.update(req_arg)
+        self.requires = frozenset(req_arg.values())
+        self.optional = frozenset(opt_arg.values())
+        if self.inject:
+            inject_set = set(six.iterkeys(self.inject))
+            self.requires -= inject_set
+            self.optional -= inject_set
+
         out_of_order = self.provides.intersection(self.requires)
         if out_of_order:
             raise exceptions.DependencyFailure(
                 "Atom %(item)s provides %(oo)s that are required "
                 "by this atom"
                 % dict(item=self.name, oo=sorted(out_of_order)))
+
+    @abc.abstractmethod
+    def execute(self, *args, **kwargs):
+        """Executes this atom."""
+
+    @abc.abstractmethod
+    def revert(self, *args, **kwargs):
+        """Reverts this atom (undoing any :meth:`execute` side-effects)."""
 
     @property
     def name(self):
@@ -185,16 +239,3 @@ class Atom(object):
         dependency to satisfy).
         """
         return set(self.save_as)
-
-    @property
-    def requires(self):
-        """Any inputs this atom requires to function (if applicable).
-
-        NOTE(harlowja): there can be no intersection between what this atom
-        requires and what it produces (since this would be an impossible
-        dependency to satisfy).
-        """
-        requires = set(self.rebind.values())
-        if self.inject:
-            requires = requires - set(six.iterkeys(self.inject))
-        return requires

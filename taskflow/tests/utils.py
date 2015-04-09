@@ -20,7 +20,7 @@ import string
 import six
 
 from taskflow import exceptions
-from taskflow.listeners import base as listener_base
+from taskflow.listeners import capturing
 from taskflow.persistence.backends import impl_memory
 from taskflow import retry
 from taskflow import task
@@ -95,6 +95,12 @@ class FakeTask(object):
         pass
 
 
+class LongArgNameTask(task.Task):
+
+    def execute(self, long_arg_name):
+        return long_arg_name
+
+
 if six.PY3:
     RUNTIME_ERROR_CLASSES = ['RuntimeError', 'Exception',
                              'BaseException', 'object']
@@ -117,57 +123,26 @@ class ProvidesRequiresTask(task.Task):
             return dict((k, k) for k in self.provides)
 
 
-class CaptureListener(listener_base.Listener):
-    _LOOKUP_NAME_POSTFIX = {
-        'task_name': '.t',
-        'retry_name': '.r',
-        'flow_name': '.f',
-    }
+# Used to format the captured values into strings (which are easier to
+# check later in tests)...
+LOOKUP_NAME_POSTFIX = {
+    capturing.CaptureListener.TASK: ('.t', 'task_name'),
+    capturing.CaptureListener.RETRY: ('.r', 'retry_name'),
+    capturing.CaptureListener.FLOW: ('.f', 'flow_name'),
+}
 
-    def __init__(self, engine,
-                 task_listen_for=listener_base.DEFAULT_LISTEN_FOR,
-                 values=None,
-                 capture_flow=True, capture_task=True, capture_retry=True,
-                 skip_tasks=None, skip_retries=None, skip_flows=None):
-        super(CaptureListener, self).__init__(engine,
-                                              task_listen_for=task_listen_for)
-        self._capture_flow = capture_flow
-        self._capture_task = capture_task
-        self._capture_retry = capture_retry
-        self._skip_tasks = skip_tasks or []
-        self._skip_flows = skip_flows or []
-        self._skip_retries = skip_retries or []
-        if values is None:
-            self.values = []
-        else:
-            self.values = values
 
-    def _capture(self, state, details, name_key):
-        name = details[name_key]
-        try:
-            name += self._LOOKUP_NAME_POSTFIX[name_key]
-        except KeyError:
-            pass
+class CaptureListener(capturing.CaptureListener):
+
+    @staticmethod
+    def _format_capture(kind, state, details):
+        name_postfix, name_key = LOOKUP_NAME_POSTFIX[kind]
+        name = details[name_key] + name_postfix
         if 'result' in details:
             name += ' %s(%s)' % (state, details['result'])
         else:
             name += " %s" % state
         return name
-
-    def _task_receiver(self, state, details):
-        if self._capture_task:
-            if details['task_name'] not in self._skip_tasks:
-                self.values.append(self._capture(state, details, 'task_name'))
-
-    def _retry_receiver(self, state, details):
-        if self._capture_retry:
-            if details['retry_name'] not in self._skip_retries:
-                self.values.append(self._capture(state, details, 'retry_name'))
-
-    def _flow_receiver(self, state, details):
-        if self._capture_flow:
-            if details['flow_name'] not in self._skip_flows:
-                self.values.append(self._capture(state, details, 'flow_name'))
 
 
 class ProgressingTask(task.Task):
@@ -186,6 +161,12 @@ class FailingTask(ProgressingTask):
         self.update_progress(0)
         self.update_progress(0.99)
         raise RuntimeError('Woot!')
+
+
+class OptionalTask(task.Task):
+    def execute(self, a, b=5):
+        result = a * b
+        return result
 
 
 class TaskWithFailure(task.Task):

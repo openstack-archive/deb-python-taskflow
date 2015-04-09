@@ -16,6 +16,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import os
 
 import six
@@ -40,8 +41,7 @@ class _DFSIter(object):
         if self.include_self:
             stack.append(self.root)
         else:
-            for child_node in self.root:
-                stack.append(child_node)
+            stack.extend(self.root.reverse_iter())
         while stack:
             node = stack.pop()
             # Visit the node.
@@ -50,8 +50,36 @@ class _DFSIter(object):
             stack.extend(node.reverse_iter())
 
 
+class _BFSIter(object):
+    """Breadth first iterator (non-recursive) over the child nodes."""
+
+    def __init__(self, root, include_self=False):
+        self.root = root
+        self.include_self = bool(include_self)
+
+    def __iter__(self):
+        q = collections.deque()
+        if self.include_self:
+            q.append(self.root)
+        else:
+            q.extend(self.root.reverse_iter())
+        while q:
+            node = q.popleft()
+            # Visit the node.
+            yield node
+            # Traverse the left & right subtree.
+            q.extend(node.reverse_iter())
+
+
 class Node(object):
     """A n-ary node class that can be used to create tree structures."""
+
+    # Constants used when pretty formatting the node (and its children).
+    STARTING_PREFIX = ""
+    EMPTY_SPACE_SEP = " "
+    HORIZONTAL_CONN = "__"
+    VERTICAL_CONN = "|"
+    LINE_SEP = os.linesep
 
     def __init__(self, item, **kwargs):
         self.item = item
@@ -96,6 +124,9 @@ class Node(object):
         This will search not only this node but also any children nodes and
         finally if nothing is found then None is returned instead of a node
         object.
+
+        :param item: item to lookup.
+        :returns: the node for an item if it exists in this node
         """
         for n in self.dfs_iter(include_self=True):
             if n.item == item:
@@ -103,7 +134,12 @@ class Node(object):
         return None
 
     def __contains__(self, item):
-        """Returns if this item exists in this node or this nodes children."""
+        """Returns whether item exists in this node or this nodes children.
+
+        :returns: if the item exists in this node or nodes children,
+                  true if the item exists, false otherwise
+        :rtype: boolean
+        """
         return self.find(item) is not None
 
     def __getitem__(self, index):
@@ -133,24 +169,24 @@ class Node(object):
         def _inner_pformat(node, level):
             if level == 0:
                 yield six.text_type(node.item)
-                prefix = ""
+                prefix = self.STARTING_PREFIX
             else:
-                yield "__%s" % six.text_type(node.item)
-                prefix = " " * 2
+                yield self.HORIZONTAL_CONN + six.text_type(node.item)
+                prefix = self.EMPTY_SPACE_SEP * len(self.HORIZONTAL_CONN)
             child_count = node.child_count()
             for (i, child) in enumerate(node):
                 for (j, text) in enumerate(_inner_pformat(child, level + 1)):
                     if j == 0 or i + 1 < child_count:
-                        text = prefix + "|" + text
+                        text = prefix + self.VERTICAL_CONN + text
                     else:
-                        text = prefix + " " + text
+                        text = prefix + self.EMPTY_SPACE_SEP + text
                     yield text
         expected_lines = self.child_count(only_direct=False)
         accumulator = six.StringIO()
         for i, line in enumerate(_inner_pformat(self, 0)):
             accumulator.write(line)
             if i < expected_lines:
-                accumulator.write(os.linesep)
+                accumulator.write(self.LINE_SEP)
         return accumulator.getvalue()
 
     def child_count(self, only_direct=True):
@@ -192,3 +228,7 @@ class Node(object):
     def dfs_iter(self, include_self=False):
         """Depth first iteration (non-recursive) over the child nodes."""
         return _DFSIter(self, include_self=include_self)
+
+    def bfs_iter(self, include_self=False):
+        """Breadth first iteration (non-recursive) over the child nodes."""
+        return _BFSIter(self, include_self=include_self)

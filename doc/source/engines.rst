@@ -37,7 +37,7 @@ imperative model involves establishing statements that accomplish a programs
 action (likely using conditionals and such other language features to do this).
 This kind of program embeds the *how* to accomplish a goal while also defining
 *what* the goal actually is (and the state of this is maintained in memory or
-on the stack while these statements execute). In contrast there is the the
+on the stack while these statements execute). In contrast there is the
 declarative model which instead of combining the *how* to accomplish a goal
 along side the *what* is to be accomplished splits these two into only
 declaring what the intended goal is and not the *how*. In TaskFlow terminology
@@ -59,10 +59,10 @@ declarative model) allows for the following functionality to become possible:
   get back into that state when resumption occurs.
 * Enhancing scalability: When a engine is responsible for executing your
   desired work it becomes possible to alter the *how* in the future by creating
-  new types of execution backends (for example the worker model which does not
-  execute locally). Without the decoupling of the *what* and the *how* it is
-  not possible to provide such a feature (since by the very nature of that
-  coupling this kind of functionality is inherently hard to provide).
+  new types of execution backends (for example the `worker`_ model which does
+  not execute locally). Without the decoupling of the *what* and the *how* it
+  is not possible to provide such a feature (since by the very nature of that
+  coupling this kind of functionality is inherently very hard to provide).
 * Enhancing consistency: Since the engine is responsible for executing atoms
   and the associated workflow, it can be one (if not the only) of the primary
   entities that is working to keep the execution model in a consistent state.
@@ -185,6 +185,8 @@ using your desired execution model.
 Workers
 -------
 
+.. _worker:
+
 **Engine type**: ``'worker-based'`` or ``'workers'``
 
 .. note:: Since this engine is significantly more complicated (and
@@ -242,9 +244,9 @@ This stage starts by setting up the storage needed for all atoms in the
 previously created graph, ensuring that corresponding
 :py:class:`~taskflow.persistence.logbook.AtomDetail` (or subclass of) objects
 are created for each node in the graph. Once this is done final validation
-occurs on the requirements that are needed to start execution and what storage
-provides.  If there is any atom or flow requirements not satisfied then
-execution will not be allowed to continue.
+occurs on the requirements that are needed to start execution and what
+:py:class:`~taskflow.storage.Storage` provides.  If there is any atom or flow
+requirements not satisfied then execution will not be allowed to continue.
 
 Execution
 ---------
@@ -311,7 +313,8 @@ atoms result will be examined and finalized using a
 :py:class:`~taskflow.engines.action_engine.completer.Completer` implementation.
 It typically will persist results to a provided persistence backend (saved
 into the corresponding :py:class:`~taskflow.persistence.logbook.AtomDetail`
-and :py:class:`~taskflow.persistence.logbook.FlowDetail` objects) and reflect
+and :py:class:`~taskflow.persistence.logbook.FlowDetail` objects via the
+:py:class:`~taskflow.storage.Storage` helper) and reflect
 the new state of the atom. At this point what typically happens falls into two
 categories, one for if that atom failed and one for if it did not. If the atom
 failed it may be set to a new intention such as ``RETRY`` or

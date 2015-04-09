@@ -39,7 +39,12 @@ _PERIODIC_ATTRS = tuple([
 
 
 def periodic(spacing, run_immediately=True):
-    """Tags a method/function as wanting/able to execute periodically."""
+    """Tags a method/function as wanting/able to execute periodically.
+
+    :param run_immediately: option to specify whether to run
+                            immediately or not
+    :type run_immediately: boolean
+    """
 
     if spacing <= 0:
         raise ValueError("Periodicity/spacing must be greater than"
@@ -108,18 +113,26 @@ class PeriodicWorker(object):
         self._callables = tuple((cb, reflection.get_callable_name(cb))
                                 for cb in almost_callables)
         self._schedule = []
-        self._immediates = []
         now = _now()
         for i, (cb, cb_name) in enumerate(self._callables):
-            spacing = getattr(cb, '_periodic_spacing')
+            spacing = cb._periodic_spacing
             next_run = now + spacing
             heapq.heappush(self._schedule, (next_run, i))
-        for (cb, cb_name) in reversed(self._callables):
-            if getattr(cb, '_periodic_run_immediately', False):
-                self._immediates.append((cb, cb_name))
+        self._immediates = self._fetch_immediates(self._callables)
 
     def __len__(self):
         return len(self._callables)
+
+    @staticmethod
+    def _fetch_immediates(callables):
+        immediates = []
+        # Reverse order is used since these are later popped off (and to
+        # ensure the popping order is first -> last we need to append them
+        # in the opposite ordering last -> first).
+        for (cb, cb_name) in reversed(callables):
+            if cb._periodic_run_immediately:
+                immediates.append((cb, cb_name))
+        return immediates
 
     @staticmethod
     def _safe_call(cb, cb_name, kind='periodic'):
@@ -154,7 +167,7 @@ class PeriodicWorker(object):
                 when_next = next_run - now
                 if when_next <= 0:
                     cb, cb_name = self._callables[i]
-                    spacing = getattr(cb, '_periodic_spacing')
+                    spacing = cb._periodic_spacing
                     LOG.debug("Calling periodic callable '%s' (it runs every"
                               " %s seconds)", cb_name, spacing)
                     self._safe_call(cb, cb_name)
@@ -173,7 +186,4 @@ class PeriodicWorker(object):
     def reset(self):
         """Resets the tombstone and re-queues up any immediate executions."""
         self._tombstone.clear()
-        self._immediates = []
-        for (cb, cb_name) in reversed(self._callables):
-            if getattr(cb, '_periodic_run_immediately', False):
-                self._immediates.append((cb, cb_name))
+        self._immediates = self._fetch_immediates(self._callables)
