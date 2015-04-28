@@ -1,6 +1,7 @@
-python-taskflow (0.7.1-1) UNRELEASED; urgency=medium
+python-taskflow (0.7.1-1) unstable; urgency=medium
 
   * New upstream release.
+  * Uploading to unstable.
   * Reviewed (build-)depends for this release.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 10 Feb 2015 15:58:07 +0100
