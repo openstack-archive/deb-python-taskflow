@@ -17,7 +17,11 @@
 import collections
 import inspect
 import random
+import string
 import time
+
+import six
+import testscenarios
 
 from taskflow import test
 from taskflow.utils import misc
@@ -190,6 +194,110 @@ class TestSequenceMinus(test.TestCase):
         self.assertEqual(result, [2, 1])
 
 
+class TestReversedEnumerate(testscenarios.TestWithScenarios, test.TestCase):
+    scenarios = [
+        ('ten', {'sample': [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]}),
+        ('empty', {'sample': []}),
+        ('negative', {'sample': [-1, -2, -3]}),
+        ('one', {'sample': [1]}),
+        ('abc', {'sample': ['a', 'b', 'c']}),
+        ('ascii_letters', {'sample': list(string.ascii_letters)}),
+    ]
+
+    def test_sample_equivalence(self):
+        expected = list(reversed(list(enumerate(self.sample))))
+        actual = list(misc.reverse_enumerate(self.sample))
+        self.assertEqual(expected, actual)
+
+
+class TestCountdownIter(test.TestCase):
+    def test_expected_count(self):
+        upper = 100
+        it = misc.countdown_iter(upper)
+        items = []
+        for i in it:
+            self.assertEqual(upper, i)
+            upper -= 1
+            items.append(i)
+        self.assertEqual(0, upper)
+        self.assertEqual(100, len(items))
+
+    def test_no_count(self):
+        it = misc.countdown_iter(0)
+        self.assertEqual(0, len(list(it)))
+        it = misc.countdown_iter(-1)
+        self.assertEqual(0, len(list(it)))
+
+    def test_expected_count_custom_decr(self):
+        upper = 100
+        it = misc.countdown_iter(upper, decr=2)
+        items = []
+        for i in it:
+            self.assertEqual(upper, i)
+            upper -= 2
+            items.append(i)
+        self.assertEqual(0, upper)
+        self.assertEqual(50, len(items))
+
+    def test_invalid_decr(self):
+        it = misc.countdown_iter(10, -1)
+        self.assertRaises(ValueError, six.next, it)
+
+
+class TestLookFor(test.TestCase):
+    def test_no_matches(self):
+        hay = [9, 10, 11]
+        self.assertEqual([], misc.look_for(hay, [1, 2, 3]))
+
+    def test_match_order(self):
+        hay = [6, 5, 4, 3, 2, 1]
+        priors = []
+        for i in range(0, 6):
+            priors.append(i + 1)
+            matches = misc.look_for(hay, priors)
+            self.assertGreater(0, len(matches))
+            self.assertIsSuperAndSubsequence(hay, matches)
+        hay = [10, 1, 15, 3, 5, 8, 44]
+        self.assertEqual([1, 15], misc.look_for(hay, [15, 1]))
+        self.assertEqual([10, 44], misc.look_for(hay, [44, 10]))
+
+
+class TestMergeUri(test.TestCase):
+    def test_merge(self):
+        url = "http://www.yahoo.com/?a=b&c=d"
+        parsed = misc.parse_uri(url)
+        joined = misc.merge_uri(parsed, {})
+        self.assertEqual('b', joined.get('a'))
+        self.assertEqual('d', joined.get('c'))
+        self.assertEqual('www.yahoo.com', joined.get('hostname'))
+
+    def test_merge_existing_hostname(self):
+        url = "http://www.yahoo.com/"
+        parsed = misc.parse_uri(url)
+        joined = misc.merge_uri(parsed, {'hostname': 'b.com'})
+        self.assertEqual('b.com', joined.get('hostname'))
+
+    def test_merge_user_password(self):
+        url = "http://josh:harlow@www.yahoo.com/"
+        parsed = misc.parse_uri(url)
+        joined = misc.merge_uri(parsed, {})
+        self.assertEqual('www.yahoo.com', joined.get('hostname'))
+        self.assertEqual('josh', joined.get('username'))
+        self.assertEqual('harlow', joined.get('password'))
+
+    def test_merge_user_password_existing(self):
+        url = "http://josh:harlow@www.yahoo.com/"
+        parsed = misc.parse_uri(url)
+        existing = {
+            'username': 'joe',
+            'password': 'biggie',
+        }
+        joined = misc.merge_uri(parsed, existing)
+        self.assertEqual('www.yahoo.com', joined.get('hostname'))
+        self.assertEqual('joe', joined.get('username'))
+        self.assertEqual('biggie', joined.get('password'))
+
+
 class TestClamping(test.TestCase):
     def test_simple_clamp(self):
         result = misc.clamp(1.0, 2.0, 3.0)
@@ -217,3 +325,18 @@ class TestClamping(test.TestCase):
 
         misc.clamp(2, 0.0, 1.0, on_clamped=on_clamped)
         self.assertEqual(1, len(calls))
+
+
+class TestIterable(test.TestCase):
+    def test_string_types(self):
+        self.assertFalse(misc.is_iterable('string'))
+        self.assertFalse(misc.is_iterable(u'string'))
+
+    def test_list(self):
+        self.assertTrue(misc.is_iterable(list()))
+
+    def test_tuple(self):
+        self.assertTrue(misc.is_iterable(tuple()))
+
+    def test_dict(self):
+        self.assertTrue(misc.is_iterable(dict()))

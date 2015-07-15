@@ -121,8 +121,13 @@ or if needed will wait for all of the atoms it depends on to complete.
 
 .. note::
 
-  A engine running a task also transitions the task to the ``PENDING`` state
+  An engine running a task also transitions the task to the ``PENDING`` state
   after it was reverted and its containing flow was restarted or retried.
+
+
+**IGNORE** - When a conditional decision has been made to skip (not
+execute) the task the engine will transition the task to
+the ``IGNORE`` state.
 
 **RUNNING** - When an engine running the task starts to execute the task, the
 engine will transition the task to the ``RUNNING`` state, and the task will
@@ -168,10 +173,14 @@ flow that the retry is associated with by consulting its
 
 .. note::
 
-  A engine running a retry also transitions the retry to the ``PENDING`` state
+  An engine running a retry also transitions the retry to the ``PENDING`` state
   after it was reverted and its associated flow was restarted or retried.
 
-**RUNNING** - When a engine starts to execute the retry, the engine
+**IGNORE** - When a conditional decision has been made to skip (not
+execute) the retry the engine will transition the retry to
+the ``IGNORE`` state.
+
+**RUNNING** - When an engine starts to execute the retry, the engine
 transitions the retry to the ``RUNNING`` state, and the retry stays in this
 state until its :py:meth:`~taskflow.retry.Retry.execute` method returns.
 
@@ -194,3 +203,26 @@ already in the ``FAILURE`` state then this is a no-op).
 **RETRYING** - If flow that is associated with the current retry was failed and
 reverted, the engine prepares the flow for the next run and transitions the
 retry to the ``RETRYING`` state.
+
+Jobs
+====
+
+.. image:: img/job_states.svg
+   :width: 500px
+   :align: center
+   :alt: Job state transitions
+
+**UNCLAIMED** - A job (with details about what work is to be completed) has
+been initially posted (by some posting entity) for work on by some other
+entity (for example a :doc:`conductor <conductors>`). This can also be a state
+that is entered when some owning entity has manually abandoned (or
+lost ownership of) a previously claimed job.
+
+**CLAIMED** - A job that is *actively* owned by some entity; typically that
+ownership is tied to jobs persistent data via some ephemeral connection so
+that the job ownership is lost (typically automatically or after some
+timeout) if that ephemeral connection is lost.
+
+**COMPLETE** - The work defined in the job has been finished by its owning
+entity and the job can no longer be processed (and it *may* be removed at
+some/any point in the future).

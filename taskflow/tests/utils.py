@@ -16,7 +16,9 @@
 
 import contextlib
 import string
+import threading
 
+import redis
 import six
 
 from taskflow import exceptions
@@ -26,7 +28,7 @@ from taskflow import retry
 from taskflow import task
 from taskflow.types import failure
 from taskflow.utils import kazoo_utils
-from taskflow.utils import threading_utils
+from taskflow.utils import redis_utils
 
 ARGS_KEY = '__args__'
 KWARGS_KEY = '__kwargs__'
@@ -73,6 +75,18 @@ def zookeeper_available(min_version, timeout=3):
         kazoo_utils.finalize_client(client)
 
 
+def redis_available(min_version):
+    client = redis.StrictRedis()
+    try:
+        client.ping()
+    except Exception:
+        return False
+    else:
+        ok, redis_version = redis_utils.is_server_new_enough(client,
+                                                             min_version)
+        return ok
+
+
 class NoopRetry(retry.AlwaysRevert):
     pass
 
@@ -87,6 +101,20 @@ class DummyTask(task.Task):
 
     def execute(self, context, *args, **kwargs):
         pass
+
+
+class AddOneSameProvidesRequires(task.Task):
+    default_provides = 'value'
+
+    def execute(self, value):
+        return value + 1
+
+
+class AddOne(task.Task):
+    default_provides = 'result'
+
+    def execute(self, source):
+        return source + 1
 
 
 class FakeTask(object):
@@ -351,7 +379,7 @@ class WaitForOneFromTask(ProgressingTask):
             self.wait_states = [wait_states]
         else:
             self.wait_states = wait_states
-        self.event = threading_utils.Event()
+        self.event = threading.Event()
 
     def execute(self):
         if not self.event.wait(WAIT_TIMEOUT):

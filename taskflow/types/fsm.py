@@ -14,15 +14,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-try:
-    from collections import OrderedDict  # noqa
-except ImportError:
-    from ordereddict import OrderedDict  # noqa
+import collections
 
 import six
 
 from taskflow import exceptions as excp
 from taskflow.types import table
+from taskflow.utils import misc
 
 
 class _Jump(object):
@@ -65,7 +63,7 @@ class FSM(object):
     """
     def __init__(self, start_state):
         self._transitions = {}
-        self._states = OrderedDict()
+        self._states = collections.OrderedDict()
         self._start_state = start_state
         self._current = None
         self.frozen = False
@@ -97,6 +95,7 @@ class FSM(object):
             return False
         return self._states[self._current.name]['terminal']
 
+    @misc.disallow_when_frozen(FrozenMachine)
     def add_state(self, state, terminal=False, on_enter=None, on_exit=None):
         """Adds a given state to the state machine.
 
@@ -111,8 +110,6 @@ class FSM(object):
         :param state: state being entered or exited
         :type state: string
         """
-        if self.frozen:
-            raise FrozenMachine()
         if state in self._states:
             raise excp.Duplicate("State '%s' already defined" % state)
         if on_enter is not None:
@@ -127,8 +124,9 @@ class FSM(object):
             'on_enter': on_enter,
             'on_exit': on_exit,
         }
-        self._transitions[state] = OrderedDict()
+        self._transitions[state] = collections.OrderedDict()
 
+    @misc.disallow_when_frozen(FrozenMachine)
     def add_reaction(self, state, event, reaction, *args, **kwargs):
         """Adds a reaction that may get triggered by the given event & state.
 
@@ -149,8 +147,6 @@ class FSM(object):
         processed (and this process typically repeats) until the state
         machine reaches a terminal state.
         """
-        if self.frozen:
-            raise FrozenMachine()
         if state not in self._states:
             raise excp.NotFound("Can not add a reaction to event '%s' for an"
                                 " undefined state '%s'" % (event, state))
@@ -162,6 +158,7 @@ class FSM(object):
             raise excp.Duplicate("State '%s' reaction to event '%s'"
                                  " already defined" % (state, event))
 
+    @misc.disallow_when_frozen(FrozenMachine)
     def add_transition(self, start, end, event):
         """Adds an allowed transition from start -> end for the given event.
 
@@ -169,8 +166,6 @@ class FSM(object):
         :param end: end of the transition
         :param event: event that caused the transition
         """
-        if self.frozen:
-            raise FrozenMachine()
         if start not in self._states:
             raise excp.NotFound("Can not add a transition on event '%s' that"
                                 " starts in a undefined state '%s'" % (event,

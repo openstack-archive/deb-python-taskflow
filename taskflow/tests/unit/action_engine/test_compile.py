@@ -34,12 +34,10 @@ class PatternCompileTest(test.TestCase):
 
     def test_retry(self):
         r = retry.AlwaysRevert('r1')
-        msg_regex = "^Retry controller .* must only be used .*"
-        self.assertRaisesRegexp(TypeError, msg_regex,
-                                compiler.PatternCompiler(r).compile)
+        self.assertRaises(TypeError, compiler.PatternCompiler(r).compile)
 
     def test_wrong_object(self):
-        msg_regex = '^Unknown item .* requested to flatten'
+        msg_regex = '^Unknown object .* requested to compile'
         self.assertRaisesRegexp(TypeError, msg_regex,
                                 compiler.PatternCompiler(42).compile)
 

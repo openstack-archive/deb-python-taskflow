@@ -17,9 +17,12 @@
 #    under the License.
 
 import collections
+import itertools
 import os
 
 import six
+
+from taskflow.utils import misc
 
 
 class FrozenNode(Exception):
@@ -98,9 +101,12 @@ class Node(object):
                 n.freeze()
             self.frozen = True
 
+    @misc.disallow_when_frozen(FrozenNode)
     def add(self, child):
-        if self.frozen:
-            raise FrozenNode()
+        """Adds a child to this node (appends to left of existing children).
+
+        NOTE(harlowja): this will also set the childs parent to be this node.
+        """
         child.parent = self
         self._children.append(child)
 
@@ -118,7 +124,7 @@ class Node(object):
             yield node
             node = node.parent
 
-    def find(self, item):
+    def find(self, item, only_direct=False, include_self=True):
         """Returns the node for an item if it exists in this node.
 
         This will search not only this node but also any children nodes and
@@ -126,12 +132,60 @@ class Node(object):
         object.
 
         :param item: item to lookup.
+        :param only_direct: only look at current node and its direct children.
+        :param include_self: include the current node during searching.
+
         :returns: the node for an item if it exists in this node
         """
-        for n in self.dfs_iter(include_self=True):
+        if only_direct:
+            if include_self:
+                it = itertools.chain([self], self.reverse_iter())
+            else:
+                it = self.reverse_iter()
+        else:
+            it = self.dfs_iter(include_self=include_self)
+        for n in it:
             if n.item == item:
                 return n
         return None
+
+    def disassociate(self):
+        """Removes this node from its parent (if any).
+
+        :returns: occurences of this node that were removed from its parent.
+        """
+        occurrences = 0
+        if self.parent is not None:
+            p = self.parent
+            self.parent = None
+            # Remove all instances of this node from its parent.
+            while True:
+                try:
+                    p._children.remove(self)
+                except ValueError:
+                    break
+                else:
+                    occurrences += 1
+        return occurrences
+
+    def remove(self, item, only_direct=False, include_self=True):
+        """Removes a item from this nodes children.
+
+        This will search not only this node but also any children nodes and
+        finally if nothing is found then a value error is raised instead of
+        the normally returned *removed* node object.
+
+        :param item: item to lookup.
+        :param only_direct: only look at current node and its direct children.
+        :param include_self: include the current node during searching.
+        """
+        node = self.find(item, only_direct=only_direct,
+                         include_self=include_self)
+        if node is None:
+            raise ValueError("Item '%s' not found to remove" % item)
+        else:
+            node.disassociate()
+            return node
 
     def __contains__(self, item):
         """Returns whether item exists in this node or this nodes children.
@@ -146,7 +200,7 @@ class Node(object):
         # NOTE(harlowja): 0 is the right most index, len - 1 is the left most
         return self._children[index]
 
-    def pformat(self):
+    def pformat(self, stringify_node=None):
         """Recursively formats a node into a nice string representation.
 
         **Example**::
@@ -166,24 +220,29 @@ class Node(object):
             |__Mobile
             |__Mail
         """
-        def _inner_pformat(node, level):
+        def _inner_pformat(node, level, stringify_node):
             if level == 0:
-                yield six.text_type(node.item)
+                yield stringify_node(node)
                 prefix = self.STARTING_PREFIX
             else:
-                yield self.HORIZONTAL_CONN + six.text_type(node.item)
+                yield self.HORIZONTAL_CONN + stringify_node(node)
                 prefix = self.EMPTY_SPACE_SEP * len(self.HORIZONTAL_CONN)
             child_count = node.child_count()
             for (i, child) in enumerate(node):
-                for (j, text) in enumerate(_inner_pformat(child, level + 1)):
+                for (j, text) in enumerate(_inner_pformat(child,
+                                                          level + 1,
+                                                          stringify_node)):
                     if j == 0 or i + 1 < child_count:
                         text = prefix + self.VERTICAL_CONN + text
                     else:
                         text = prefix + self.EMPTY_SPACE_SEP + text
                     yield text
+        if stringify_node is None:
+            # Default to making a unicode string out of the nodes item...
+            stringify_node = lambda node: six.text_type(node.item)
         expected_lines = self.child_count(only_direct=False)
         accumulator = six.StringIO()
-        for i, line in enumerate(_inner_pformat(self, 0)):
+        for i, line in enumerate(_inner_pformat(self, 0, stringify_node)):
             accumulator.write(line)
             if i < expected_lines:
                 accumulator.write(self.LINE_SEP)

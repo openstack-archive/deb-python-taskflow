@@ -40,10 +40,11 @@ REVERTING = REVERTING
 SUCCESS = SUCCESS
 RUNNING = RUNNING
 RETRYING = 'RETRYING'
+IGNORE = 'IGNORE'
 
 # Atom intentions.
 EXECUTE = 'EXECUTE'
-IGNORE = 'IGNORE'
+IGNORE = IGNORE
 REVERT = 'REVERT'
 RETRY = 'RETRY'
 INTENTIONS = (EXECUTE, IGNORE, REVERT, RETRY)
@@ -52,6 +53,37 @@ INTENTIONS = (EXECUTE, IGNORE, REVERT, RETRY)
 SCHEDULING = 'SCHEDULING'
 WAITING = 'WAITING'
 ANALYZING = 'ANALYZING'
+
+# Job state transitions
+# See: http://docs.openstack.org/developer/taskflow/states.html
+
+_ALLOWED_JOB_TRANSITIONS = frozenset((
+    # Job is being claimed.
+    (UNCLAIMED, CLAIMED),
+
+    # Job has been lost (or manually unclaimed/abandoned).
+    (CLAIMED, UNCLAIMED),
+
+    # Job has been finished.
+    (CLAIMED, COMPLETE),
+))
+
+
+def check_job_transition(old_state, new_state):
+    """Check that job can transition from from ``old_state`` to ``new_state``.
+
+    If transition can be performed, it returns true. If transition
+    should be ignored, it returns false. If transition is not
+    valid, it raises an InvalidState exception.
+    """
+    if old_state == new_state:
+        return False
+    pair = (old_state, new_state)
+    if pair in _ALLOWED_JOB_TRANSITIONS:
+        return True
+    raise exc.InvalidState("Job transition from '%s' to '%s' is not allowed"
+                           % pair)
+
 
 # Flow state transitions
 # See: http://docs.openstack.org/developer/taskflow/states.html
@@ -107,10 +139,10 @@ _IGNORED_FLOW_TRANSITIONS = frozenset(
 
 
 def check_flow_transition(old_state, new_state):
-    """Check that flow can transition from old_state to new_state.
+    """Check that flow can transition from ``old_state`` to ``new_state``.
 
-    If transition can be performed, it returns True. If transition
-    should be ignored, it returns False. If transition is not
+    If transition can be performed, it returns true. If transition
+    should be ignored, it returns false. If transition is not
     valid, it raises an InvalidState exception.
     """
     if old_state == new_state:
@@ -120,7 +152,7 @@ def check_flow_transition(old_state, new_state):
         return True
     if pair in _IGNORED_FLOW_TRANSITIONS:
         return False
-    raise exc.InvalidState("Flow transition from %s to %s is not allowed"
+    raise exc.InvalidState("Flow transition from '%s' to '%s' is not allowed"
                            % pair)
 
 
@@ -129,6 +161,7 @@ def check_flow_transition(old_state, new_state):
 
 _ALLOWED_TASK_TRANSITIONS = frozenset((
     (PENDING, RUNNING),       # run it!
+    (PENDING, IGNORE),        # skip it!
 
     (RUNNING, SUCCESS),       # the task finished successfully
     (RUNNING, FAILURE),       # the task failed
@@ -140,18 +173,38 @@ _ALLOWED_TASK_TRANSITIONS = frozenset((
     (REVERTING, FAILURE),     # revert failed
 
     (REVERTED, PENDING),      # try again
-
-    (SUCCESS, RETRYING),      # retrying retry controller
-    (RETRYING, RUNNING),      # run retry controller that has been retrying
+    (IGNORE, PENDING),        # try again
 ))
 
 
 def check_task_transition(old_state, new_state):
-    """Check that task can transition from old_state to new_state.
+    """Check that task can transition from ``old_state`` to ``new_state``.
 
-    If transition can be performed, it returns True, False otherwise.
+    If transition can be performed, it returns true, false otherwise.
     """
     pair = (old_state, new_state)
     if pair in _ALLOWED_TASK_TRANSITIONS:
+        return True
+    return False
+
+
+# Retry state transitions
+# See: http://docs.openstack.org/developer/taskflow/states.html#retry
+
+_ALLOWED_RETRY_TRANSITIONS = list(_ALLOWED_TASK_TRANSITIONS)
+_ALLOWED_RETRY_TRANSITIONS.extend([
+    (SUCCESS, RETRYING),      # retrying retry controller
+    (RETRYING, RUNNING),      # run retry controller that has been retrying
+])
+_ALLOWED_RETRY_TRANSITIONS = frozenset(_ALLOWED_RETRY_TRANSITIONS)
+
+
+def check_retry_transition(old_state, new_state):
+    """Check that retry can transition from ``old_state`` to ``new_state``.
+
+    If transition can be performed, it returns true, false otherwise.
+    """
+    pair = (old_state, new_state)
+    if pair in _ALLOWED_RETRY_TRANSITIONS:
         return True
     return False

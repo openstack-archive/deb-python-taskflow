@@ -34,6 +34,30 @@ Using listeners
     :linenos:
     :lines: 16-
 
+Using listeners (to watch a phone call)
+=======================================
+
+.. note::
+
+    Full source located at :example:`simple_linear_listening`.
+
+.. literalinclude:: ../../taskflow/examples/simple_linear_listening.py
+    :language: python
+    :linenos:
+    :lines: 16-
+
+Dumping a in-memory backend
+===========================
+
+.. note::
+
+    Full source located at :example:`dump_memory_backend`.
+
+.. literalinclude:: ../../taskflow/examples/dump_memory_backend.py
+    :language: python
+    :linenos:
+    :lines: 16-
+
 Making phone calls
 ==================
 
@@ -176,6 +200,18 @@ Summation mapper(s) and reducer (in parallel)
     :linenos:
     :lines: 16-
 
+Sharing a thread pool executor (in parallel)
+============================================
+
+.. note::
+
+    Full source located at :example:`share_engine_thread`
+
+.. literalinclude:: ../../taskflow/examples/share_engine_thread.py
+    :language: python
+    :linenos:
+    :lines: 16-
+
 Storing & emitting a bill
 =========================
 
@@ -303,6 +339,31 @@ Jobboard producer/consumer (simple)
     Full source located at :example:`jobboard_produce_consume_colors`
 
 .. literalinclude:: ../../taskflow/examples/jobboard_produce_consume_colors.py
+    :language: python
+    :linenos:
+    :lines: 16-
+
+Conductor simulating a CI pipeline
+==================================
+
+.. note::
+
+    Full source located at :example:`tox_conductor`
+
+.. literalinclude:: ../../taskflow/examples/tox_conductor.py
+    :language: python
+    :linenos:
+    :lines: 16-
+
+
+Conductor running 99 bottles of beer song requests
+==================================================
+
+.. note::
+
+    Full source located at :example:`99_bottles`
+
+.. literalinclude:: ../../taskflow/examples/99_bottles.py
     :language: python
     :linenos:
     :lines: 16-

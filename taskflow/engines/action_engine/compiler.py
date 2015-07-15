@@ -17,14 +17,14 @@
 import collections
 import threading
 
+import fasteners
+
 from taskflow import exceptions as exc
 from taskflow import flow
 from taskflow import logging
-from taskflow import retry
 from taskflow import task
 from taskflow.types import graph as gr
 from taskflow.types import tree as tr
-from taskflow.utils import lock_utils
 from taskflow.utils import misc
 
 LOG = logging.getLogger(__name__)
@@ -158,13 +158,22 @@ class Linker(object):
                         " decomposed into an empty graph" % (v, u, u))
                 for u in u_g.nodes_iter():
                     for v in v_g.nodes_iter():
-                        depends_on = u.provides & v.requires
+                        # This is using the intersection() method vs the &
+                        # operator since the latter doesn't work with frozen
+                        # sets (when used in combination with ordered sets).
+                        #
+                        # If this is not done the following happens...
+                        #
+                        # TypeError: unsupported operand type(s)
+                        # for &: 'frozenset' and 'OrderedSet'
+                        depends_on = u.provides.intersection(v.requires)
                         if depends_on:
+                            edge_attrs = {
+                                _EDGE_REASONS: frozenset(depends_on),
+                            }
                             _add_update_edges(graph,
                                               [u], [v],
-                                              attr_dict={
-                                                  _EDGE_REASONS: depends_on,
-                                              })
+                                              attr_dict=edge_attrs)
             else:
                 # Connect nodes with no predecessors in v to nodes with no
                 # successors in the *first* non-empty predecessor of v (thus
@@ -180,8 +189,84 @@ class Linker(object):
             priors.append((u, v))
 
 
+class _TaskCompiler(object):
+    """Non-recursive compiler of tasks."""
+
+    @staticmethod
+    def handles(obj):
+        return isinstance(obj, task.BaseTask)
+
+    def compile(self, task, parent=None):
+        graph = gr.DiGraph(name=task.name)
+        graph.add_node(task)
+        node = tr.Node(task)
+        if parent is not None:
+            parent.add(node)
+        return graph, node
+
+
+class _FlowCompiler(object):
+    """Recursive compiler of flows."""
+
+    @staticmethod
+    def handles(obj):
+        return isinstance(obj, flow.Flow)
+
+    def __init__(self, deep_compiler_func, linker):
+        self._deep_compiler_func = deep_compiler_func
+        self._linker = linker
+
+    def _connect_retry(self, retry, graph):
+        graph.add_node(retry)
+
+        # All nodes that have no predecessors should depend on this retry.
+        nodes_to = [n for n in graph.no_predecessors_iter() if n is not retry]
+        if nodes_to:
+            _add_update_edges(graph, [retry], nodes_to,
+                              attr_dict=_RETRY_EDGE_DATA)
+
+        # Add association for each node of graph that has no existing retry.
+        for n in graph.nodes_iter():
+            if n is not retry and flow.LINK_RETRY not in graph.node[n]:
+                graph.node[n][flow.LINK_RETRY] = retry
+
+    @staticmethod
+    def _occurence_detector(to_graph, from_graph):
+        return sum(1 for node in from_graph.nodes_iter()
+                   if node in to_graph)
+
+    def _decompose_flow(self, flow, parent=None):
+        """Decomposes a flow into a graph, tree node + decomposed subgraphs."""
+        graph = gr.DiGraph(name=flow.name)
+        node = tr.Node(flow)
+        if parent is not None:
+            parent.add(node)
+        if flow.retry is not None:
+            node.add(tr.Node(flow.retry))
+        decomposed_members = {}
+        for item in flow:
+            subgraph, _subnode = self._deep_compiler_func(item, parent=node)
+            decomposed_members[item] = subgraph
+            if subgraph.number_of_nodes():
+                graph = gr.merge_graphs(
+                    graph, subgraph,
+                    # We can specialize this to be simpler than the default
+                    # algorithm which creates overhead that we don't
+                    # need for our purposes...
+                    overlap_detector=self._occurence_detector)
+        return graph, node, decomposed_members
+
+    def compile(self, flow, parent=None):
+        graph, node, decomposed_members = self._decompose_flow(flow,
+                                                               parent=parent)
+        self._linker.apply_constraints(graph, flow, decomposed_members)
+        if flow.retry is not None:
+            self._connect_retry(flow.retry, graph)
+        return graph, node
+
+
 class PatternCompiler(object):
-    """Compiles a pattern (or task) into a compilation unit.
+    """Compiles a flow pattern (or task) into a compilation unit.
 
     Let's dive into the basic idea for how this works:
 
@@ -189,9 +274,10 @@ class PatternCompiler(object):
     this object could be a task, or a flow (one of the supported patterns),
     the end-goal is to produce a :py:class:`.Compilation` object as the result
     with the needed components. If this is not possible a
-    :py:class:`~.taskflow.exceptions.CompilationFailure` will be raised (or
-    in the case where a unknown type is being requested to compile
-    a ``TypeError`` will be raised).
+    :py:class:`~.taskflow.exceptions.CompilationFailure` will be raised.
+    In the case where a **unknown** type is being requested to compile
+    a ``TypeError`` will be raised and when a duplicate object (one that
+    has **already** been compiled) is encountered a ``ValueError`` is raised.
 
     The complexity of this comes into play when the 'root' is a flow that
     contains itself other nested flows (and so-on); to compile this object and
@@ -281,98 +367,40 @@ class PatternCompiler(object):
         self._freeze = freeze
         self._lock = threading.Lock()
         self._compilation = None
+        self._matchers = [
+            _FlowCompiler(self._compile, self._linker),
+            _TaskCompiler(),
+        ]
 
-    def _flatten(self, item, parent):
-        """Flattens a item (pattern, task) into a graph + tree node."""
-        functor = self._find_flattener(item, parent)
-        self._pre_item_flatten(item)
-        graph, node = functor(item, parent)
-        self._post_item_flatten(item, graph, node)
-        return graph, node
-
-    def _find_flattener(self, item, parent):
-        """Locates the flattening function to use to flatten the given item."""
-        if isinstance(item, flow.Flow):
-            return self._flatten_flow
-        elif isinstance(item, task.BaseTask):
-            return self._flatten_task
-        elif isinstance(item, retry.Retry):
-            if parent is None:
-                raise TypeError("Retry controller '%s' (%s) must only be used"
-                                " as a flow constructor parameter and not as a"
-                                " root component" % (item, type(item)))
-            else:
-                raise TypeError("Retry controller '%s' (%s) must only be used"
-                                " as a flow constructor parameter and not as a"
-                                " flow added component" % (item, type(item)))
+    def _compile(self, item, parent=None):
+        """Compiles a item (pattern, task) into a graph + tree node."""
+        for m in self._matchers:
+            if m.handles(item):
+                self._pre_item_compile(item)
+                graph, node = m.compile(item, parent=parent)
+                self._post_item_compile(item, graph, node)
+                return graph, node
         else:
-            raise TypeError("Unknown item '%s' (%s) requested to flatten"
+            raise TypeError("Unknown object '%s' (%s) requested to compile"
                             % (item, type(item)))
 
-    def _connect_retry(self, retry, graph):
-        graph.add_node(retry)
-
-        # All nodes that have no predecessors should depend on this retry.
-        nodes_to = [n for n in graph.no_predecessors_iter() if n is not retry]
-        if nodes_to:
-            _add_update_edges(graph, [retry], nodes_to,
-                              attr_dict=_RETRY_EDGE_DATA)
-
-        # Add association for each node of graph that has no existing retry.
-        for n in graph.nodes_iter():
-            if n is not retry and flow.LINK_RETRY not in graph.node[n]:
-                graph.node[n][flow.LINK_RETRY] = retry
-
-    def _flatten_task(self, task, parent):
-        """Flattens a individual task."""
-        graph = gr.DiGraph(name=task.name)
-        graph.add_node(task)
-        node = tr.Node(task)
-        if parent is not None:
-            parent.add(node)
-        return graph, node
-
-    def _decompose_flow(self, flow, parent):
-        """Decomposes a flow into a graph, tree node + decomposed subgraphs."""
-        graph = gr.DiGraph(name=flow.name)
-        node = tr.Node(flow)
-        if parent is not None:
-            parent.add(node)
-        if flow.retry is not None:
-            node.add(tr.Node(flow.retry))
-        decomposed_members = {}
-        for item in flow:
-            subgraph, _subnode = self._flatten(item, node)
-            decomposed_members[item] = subgraph
-            if subgraph.number_of_nodes():
-                graph = gr.merge_graphs([graph, subgraph])
-        return graph, node, decomposed_members
-
-    def _flatten_flow(self, flow, parent):
-        """Flattens a flow."""
-        graph, node, decomposed_members = self._decompose_flow(flow, parent)
-        self._linker.apply_constraints(graph, flow, decomposed_members)
-        if flow.retry is not None:
-            self._connect_retry(flow.retry, graph)
-        return graph, node
-
-    def _pre_item_flatten(self, item):
-        """Called before a item is flattened; any pre-flattening actions."""
+    def _pre_item_compile(self, item):
+        """Called before a item is compiled; any pre-compilation actions."""
         if item in self._history:
-            raise ValueError("Already flattened item '%s' (%s), recursive"
-                             " flattening is not supported" % (item,
-                                                               type(item)))
+            raise ValueError("Already compiled item '%s' (%s), duplicate"
+                             " and/or recursive compiling is not"
+                             " supported" % (item, type(item)))
         self._history.add(item)
 
-    def _post_item_flatten(self, item, graph, node):
-        """Called after a item is flattened; doing post-flattening actions."""
+    def _post_item_compile(self, item, graph, node):
+        """Called after a item is compiled; doing post-compilation actions."""
 
-    def _pre_flatten(self):
-        """Called before the flattening of the root starts."""
+    def _pre_compile(self):
+        """Called before the compilation of the root starts."""
         self._history.clear()
 
-    def _post_flatten(self, graph, node):
-        """Called after the flattening of the root finishes successfully."""
+    def _post_compile(self, graph, node):
+        """Called after the compilation of the root finishes successfully."""
         dup_names = misc.get_duplicate_keys(graph.nodes_iter(),
                                             key=lambda node: node.name)
         if dup_names:
@@ -396,13 +424,13 @@ class PatternCompiler(object):
                 # Indent it so that it's slightly offset from the above line.
                 LOG.blather("  %s", line)
 
-    @lock_utils.locked
+    @fasteners.locked
     def compile(self):
         """Compiles the contained item into a compiled equivalent."""
         if self._compilation is None:
-            self._pre_flatten()
-            graph, node = self._flatten(self._root, None)
-            self._post_flatten(graph, node)
+            self._pre_compile()
+            graph, node = self._compile(self._root, parent=None)
+            self._post_compile(graph, node)
             if self._freeze:
                 graph.freeze()
                 node.freeze()

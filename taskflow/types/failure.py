@@ -23,6 +23,7 @@ from oslo_utils import reflection
 import six
 
 from taskflow import exceptions as exc
+from taskflow.utils import schema_utils as su
 
 
 def _copy_exc_info(exc_info):
@@ -126,11 +127,52 @@ class Failure(object):
       to have code ran when this happens, and this can cause issues and
       side-effects that the receiver would not have intended to have caused).
 
-    TODO(harlowja): when/if http://bugs.python.org/issue17911 merges and
-    becomes available for use we should be able to use that and simplify the
-    methods and contents of this object.
+    TODO(harlowja): use parts of http://bugs.python.org/issue17911 and the
+    backport at https://pypi.python.org/pypi/traceback2/ to (hopefully)
+    simplify the methods and contents of this object...
     """
     DICT_VERSION = 1
+
+    #: Expected failure schema (in json schema format).
+    SCHEMA = {
+        "$ref": "#/definitions/cause",
+        "definitions": {
+            "cause": {
+                "type": "object",
+                'properties': {
+                    'version': {
+                        "type": "integer",
+                        "minimum": 0,
+                    },
+                    'exception_str': {
+                        "type": "string",
+                    },
+                    'traceback_str': {
+                        "type": "string",
+                    },
+                    'exc_type_names': {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                        },
+                        "minItems": 1,
+                    },
+                    'causes': {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/definitions/cause",
+                        },
+                    }
+                },
+                "required": [
+                    "exception_str",
+                    'traceback_str',
+                    'exc_type_names',
+                ],
+                "additionalProperties": True,
+            },
+        },
+    }
 
     def __init__(self, exc_info=None, **kwargs):
         if not kwargs:
@@ -152,8 +194,10 @@ class Failure(object):
             self._exception_str = exc.exception_message(self._exc_info[1])
             self._traceback_str = ''.join(
                 traceback.format_tb(self._exc_info[2]))
+            self._causes = kwargs.pop('causes', None)
         else:
-            self._exc_info = exc_info  # may be None
+            self._causes = kwargs.pop('causes', None)
+            self._exc_info = exc_info
             self._exception_str = kwargs.pop('exception_str')
             self._exc_type_names = tuple(kwargs.pop('exc_type_names', []))
             self._traceback_str = kwargs.pop('traceback_str', None)
@@ -165,14 +209,28 @@ class Failure(object):
     @classmethod
     def from_exception(cls, exception):
         """Creates a failure object from a exception instance."""
-        return cls((type(exception), exception, None))
+        exc_info = (
+            type(exception),
+            exception,
+            getattr(exception, '__traceback__', None)
+        )
+        return cls(exc_info=exc_info)
+
+    @classmethod
+    def validate(cls, data):
+        try:
+            su.schema_validate(data, cls.SCHEMA)
+        except su.ValidationError as e:
+            raise exc.InvalidFormat("Failure data not of the"
+                                    " expected format: %s" % (e.message), e)
 
     def _matches(self, other):
         if self is other:
             return True
         return (self._exc_type_names == other._exc_type_names
                 and self.exception_str == other.exception_str
-                and self.traceback_str == other.traceback_str)
+                and self.traceback_str == other.traceback_str
+                and self.causes == other.causes)
 
     def matches(self, other):
         """Checks if another object is equivalent to this object.
@@ -269,6 +327,66 @@ class Failure(object):
                 return cls
         return None
 
+    @classmethod
+    def _extract_causes_iter(cls, exc_val):
+        seen = [exc_val]
+        causes = [exc_val]
+        while causes:
+            exc_val = causes.pop()
+            if exc_val is None:
+                continue
+            # See: https://www.python.org/dev/peps/pep-3134/ for why/what
+            # these are...
+            #
+            # '__cause__' attribute for explicitly chained exceptions
+            # '__context__' attribute for implicitly chained exceptions
+            # '__traceback__' attribute for the traceback
+            #
+            # See: https://www.python.org/dev/peps/pep-0415/ for why/what
+            # the '__suppress_context__' is/means/implies...
+            supress_context = getattr(exc_val,
+                                      '__suppress_context__', False)
+            if supress_context:
+                attr_lookups = ['__cause__']
+            else:
+                attr_lookups = ['__cause__', '__context__']
+            nested_exc_val = None
+            for attr_name in attr_lookups:
+                attr_val = getattr(exc_val, attr_name, None)
+                if attr_val is None:
+                    continue
+                if attr_val not in seen:
+                    nested_exc_val = attr_val
+                    break
+            if nested_exc_val is not None:
+                exc_info = (
+                    type(nested_exc_val),
+                    nested_exc_val,
+                    getattr(nested_exc_val, '__traceback__', None),
+                )
+                seen.append(nested_exc_val)
+                causes.append(nested_exc_val)
+                yield cls(exc_info=exc_info)
+
+    @property
+    def causes(self):
+        """Tuple of all *inner* failure *causes* of this failure.
+
+        NOTE(harlowja): Does **not** include the current failure (only
+        returns connected causes of this failure, if any). This property
+        is really only useful on 3.x or newer versions of python as older
+        versions do **not** have associated causes (the tuple will **always**
+        be empty on 2.x versions of python).
+
+        Refer to :pep:`3134` and :pep:`409` and :pep:`415` for what
+        this is examining to find failure causes.
+        """
+        if self._causes is not None:
+            return self._causes
+        else:
+            self._causes = tuple(self._extract_causes_iter(self.exception))
+            return self._causes
+
     def __str__(self):
         return self.pformat()
 
@@ -323,6 +441,10 @@ class Failure(object):
             self._exc_info = tuple(_fill_iter(dct['exc_info'], 3))
         else:
             self._exc_info = None
+        causes = dct.get('causes')
+        if causes is not None:
+            causes = tuple(self.from_dict(d) for d in causes)
+        self._causes = causes
 
     @classmethod
     def from_dict(cls, data):
@@ -332,6 +454,9 @@ class Failure(object):
         if version != cls.DICT_VERSION:
             raise ValueError('Invalid dict version of failure object: %r'
                              % version)
+        causes = data.get('causes')
+        if causes is not None:
+            data['causes'] = tuple(cls.from_dict(d) for d in causes)
         return cls(**data)
 
     def to_dict(self):
@@ -341,6 +466,7 @@ class Failure(object):
             'traceback_str': self.traceback_str,
             'exc_type_names': list(self),
             'version': self.DICT_VERSION,
+            'causes': [f.to_dict() for f in self.causes],
         }
 
     def copy(self):
@@ -348,4 +474,5 @@ class Failure(object):
         return Failure(exc_info=_copy_exc_info(self.exc_info),
                        exception_str=self.exception_str,
                        traceback_str=self.traceback_str,
-                       exc_type_names=self._exc_type_names[:])
+                       exc_type_names=self._exc_type_names[:],
+                       causes=self._causes)

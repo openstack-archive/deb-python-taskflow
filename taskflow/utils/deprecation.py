@@ -14,16 +14,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import functools
 import warnings
 
 from oslo_utils import reflection
-import six
-
-_CLASS_MOVED_PREFIX_TPL = "Class '%s' has moved to '%s'"
-_KIND_MOVED_PREFIX_TPL = "%s '%s' has moved to '%s'"
-_KWARG_MOVED_POSTFIX_TPL = ", please use the '%s' argument instead"
-_KWARG_MOVED_PREFIX_TPL = "Using the '%s' argument is deprecated"
 
 
 def deprecation(message, stacklevel=None):
@@ -118,8 +111,8 @@ class MovedClassProxy(object):
             type(self).__name__, id(self), wrapped, id(wrapped))
 
 
-def _generate_moved_message(prefix, postfix=None, message=None,
-                            version=None, removal_version=None):
+def _generate_message(prefix, postfix=None, message=None,
+                      version=None, removal_version=None):
     message_components = [prefix]
     if version:
         message_components.append(" in version '%s'" % version)
@@ -137,134 +130,9 @@ def _generate_moved_message(prefix, postfix=None, message=None,
     return ''.join(message_components)
 
 
-def renamed_kwarg(old_name, new_name, message=None,
-                  version=None, removal_version=None, stacklevel=3):
-    """Decorates a kwarg accepting function to deprecate a renamed kwarg."""
-
-    prefix = _KWARG_MOVED_PREFIX_TPL % old_name
-    postfix = _KWARG_MOVED_POSTFIX_TPL % new_name
-    out_message = _generate_moved_message(prefix, postfix=postfix,
-                                          message=message, version=version,
-                                          removal_version=removal_version)
-
-    def decorator(f):
-
-        @six.wraps(f)
-        def wrapper(*args, **kwargs):
-            if old_name in kwargs:
-                deprecation(out_message, stacklevel=stacklevel)
-            return f(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def removed_kwarg(old_name, message=None,
-                  version=None, removal_version=None, stacklevel=3):
-    """Decorates a kwarg accepting function to deprecate a removed kwarg."""
-
-    prefix = _KWARG_MOVED_PREFIX_TPL % old_name
-    out_message = _generate_moved_message(prefix, postfix=None,
-                                          message=message, version=version,
-                                          removal_version=removal_version)
-
-    def decorator(f):
-
-        @six.wraps(f)
-        def wrapper(*args, **kwargs):
-            if old_name in kwargs:
-                deprecation(out_message, stacklevel=stacklevel)
-            return f(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def _moved_decorator(kind, new_attribute_name, message=None,
-                     version=None, removal_version=None,
-                     stacklevel=3):
-    """Decorates a method/property that was moved to another location."""
-
-    def decorator(f):
-        try:
-            old_attribute_name = f.__qualname__
-            fully_qualified = True
-        except AttributeError:
-            old_attribute_name = f.__name__
-            fully_qualified = False
-
-        @six.wraps(f)
-        def wrapper(self, *args, **kwargs):
-            base_name = reflection.get_class_name(self, fully_qualified=False)
-            if fully_qualified:
-                old_name = old_attribute_name
-            else:
-                old_name = ".".join((base_name, old_attribute_name))
-            new_name = ".".join((base_name, new_attribute_name))
-            prefix = _KIND_MOVED_PREFIX_TPL % (kind, old_name, new_name)
-            out_message = _generate_moved_message(
-                prefix, message=message,
-                version=version, removal_version=removal_version)
-            deprecation(out_message, stacklevel=stacklevel)
-            return f(self, *args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def moved_property(new_attribute_name, message=None,
-                   version=None, removal_version=None, stacklevel=3):
-    """Decorates a *instance* property that was moved to another location."""
-
-    return _moved_decorator('Property', new_attribute_name, message=message,
-                            version=version, removal_version=removal_version,
-                            stacklevel=stacklevel)
-
-
-def moved_inheritable_class(new_class, old_class_name, old_module_name,
-                            message=None, version=None, removal_version=None):
-    """Deprecates a class that was moved to another location.
-
-    NOTE(harlowja): this creates a new-old type that can be used for a
-    deprecation period that can be inherited from, the difference between this
-    and the ``moved_class`` deprecation function is that the proxy from that
-    function can not be inherited from (thus limiting its use for a more
-    particular usecase where inheritance is not needed).
-
-    This will emit warnings when the old locations class is initialized,
-    telling where the new and improved location for the old class now is.
-    """
-    old_name = ".".join((old_module_name, old_class_name))
-    new_name = reflection.get_class_name(new_class)
-    prefix = _CLASS_MOVED_PREFIX_TPL % (old_name, new_name)
-    out_message = _generate_moved_message(prefix,
-                                          message=message, version=version,
-                                          removal_version=removal_version)
-
-    def decorator(f):
-
-        # Use the older functools until the following is available:
-        #
-        # https://bitbucket.org/gutworth/six/issue/105
-
-        @functools.wraps(f, assigned=("__name__", "__doc__"))
-        def wrapper(self, *args, **kwargs):
-            deprecation(out_message, stacklevel=3)
-            return f(self, *args, **kwargs)
-
-        return wrapper
-
-    old_class = type(old_class_name, (new_class,), {})
-    old_class.__module__ = old_module_name
-    old_class.__init__ = decorator(old_class.__init__)
-    return old_class
-
-
-def moved_class(new_class, old_class_name, old_module_name, message=None,
-                version=None, removal_version=None, stacklevel=3):
+def moved_proxy_class(new_class, old_class_name, old_module_name,
+                      message=None, version=None, removal_version=None,
+                      stacklevel=3):
     """Deprecates a class that was moved to another location.
 
     This will emit warnings when the old locations class is initialized,
@@ -272,8 +140,8 @@ def moved_class(new_class, old_class_name, old_module_name, message=None,
     """
     old_name = ".".join((old_module_name, old_class_name))
     new_name = reflection.get_class_name(new_class)
-    prefix = _CLASS_MOVED_PREFIX_TPL % (old_name, new_name)
-    out_message = _generate_moved_message(prefix,
-                                          message=message, version=version,
-                                          removal_version=removal_version)
+    prefix = "Class '%s' has moved to '%s'" % (old_name, new_name)
+    out_message = _generate_message(prefix,
+                                    message=message, version=version,
+                                    removal_version=removal_version)
     return MovedClassProxy(new_class, out_message, stacklevel=stacklevel)

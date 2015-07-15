@@ -14,6 +14,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import mock
+
 import optparse
 import os
 import sys
@@ -22,8 +24,9 @@ top_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),
                                        os.pardir))
 sys.path.insert(0, top_dir)
 
-# To get this installed you may have to follow:
-# https://code.google.com/p/pydot/issues/detail?id=93 (until fixed).
+# To get this installed you have to do the following:
+#
+# $ pip install pydot2
 import pydot
 
 from taskflow.engines.action_engine import runner
@@ -36,10 +39,10 @@ from taskflow.types import fsm
 # actually be running it...).
 class DummyRuntime(object):
     def __init__(self):
-        self.analyzer = None
-        self.completer = None
-        self.scheduler = None
-        self.storage = None
+        self.analyzer = mock.MagicMock()
+        self.completer = mock.MagicMock()
+        self.scheduler = mock.MagicMock()
+        self.storage = mock.MagicMock()
 
 
 def clean_event(name):
@@ -48,12 +51,10 @@ def clean_event(name):
     return name
 
 
-def make_machine(start_state, transitions, disallowed):
+def make_machine(start_state, transitions):
     machine = fsm.FSM(start_state)
     machine.add_state(start_state)
     for (start_state, end_state) in transitions:
-        if start_state in disallowed or end_state in disallowed:
-            continue
         if start_state not in machine:
             machine.add_state(start_state)
         if end_state not in machine:
@@ -71,7 +72,7 @@ def map_color(internal_states, state):
         return 'red'
     if state == states.REVERTED:
         return 'darkorange'
-    if state == states.SUCCESS:
+    if state in (states.SUCCESS, states.COMPLETE):
         return 'green'
     return None
 
@@ -96,6 +97,10 @@ def main():
                       action='store_true',
                       help="use wbe request transitions",
                       default=False)
+    parser.add_option("-j", "--jobs", dest="jobs",
+                      action='store_true',
+                      help="use job transitions",
+                      default=False)
     parser.add_option("-T", "--format", dest="format",
                       help="output in given format",
                       default='svg')
@@ -109,9 +114,10 @@ def main():
         options.retries,
         options.tasks,
         options.wbe_requests,
+        options.jobs,
     ]
     if sum([int(i) for i in types]) > 1:
-        parser.error("Only one of task/retry/engines/wbe requests"
+        parser.error("Only one of task/retry/engines/wbe requests/jobs"
                      " may be specified.")
 
     internal_states = list()
@@ -119,26 +125,29 @@ def main():
     if options.tasks:
         source_type = "Tasks"
         source = make_machine(states.PENDING,
-                              list(states._ALLOWED_TASK_TRANSITIONS),
-                              [states.RETRYING])
+                              list(states._ALLOWED_TASK_TRANSITIONS))
     elif options.retries:
         source_type = "Retries"
         source = make_machine(states.PENDING,
-                              list(states._ALLOWED_TASK_TRANSITIONS), [])
+                              list(states._ALLOWED_RETRY_TRANSITIONS))
     elif options.engines:
         source_type = "Engines"
-        r = runner.Runner(DummyRuntime(), None)
-        source, memory = r.builder.build()
+        r = runner.Runner(DummyRuntime(), mock.MagicMock())
+        source, memory = r.build()
         internal_states.extend(runner._META_STATES)
         ordering = 'out'
     elif options.wbe_requests:
         source_type = "WBE requests"
         source = make_machine(protocol.WAITING,
-                              list(protocol._ALLOWED_TRANSITIONS), [])
+                              list(protocol._ALLOWED_TRANSITIONS))
+    elif options.jobs:
+        source_type = "Jobs"
+        source = make_machine(states.UNCLAIMED,
+                              list(states._ALLOWED_JOB_TRANSITIONS))
     else:
         source_type = "Flow"
         source = make_machine(states.PENDING,
-                              list(states._ALLOWED_FLOW_TRANSITIONS), [])
+                              list(states._ALLOWED_FLOW_TRANSITIONS))
 
     graph_name = "%s states" % source_type
     g = pydot.Dot(graph_name=graph_name, rankdir='LR',

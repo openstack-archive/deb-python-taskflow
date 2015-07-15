@@ -2,6 +2,10 @@
 Conductors
 ----------
 
+.. image:: img/conductor.png
+   :width: 97px
+   :alt: Conductor
+
 Overview
 ========
 
@@ -18,14 +22,14 @@ They are responsible for the following:
   tasks and flows to be executed).
 * Dispatching the engine using the provided :doc:`persistence <persistence>`
   layer and engine configuration.
-* Completing or abandoning the claimed job (depending on dispatching and
-  execution outcome).
+* Completing or abandoning the claimed :doc:`job <jobs>` (depending on
+  dispatching and execution outcome).
 * *Rinse and repeat*.
 
 .. note::
 
      They are inspired by and have similar responsibilities
-     as `railroad conductors`_.
+     as `railroad conductors`_ or `musical conductors`_.
 
 Considerations
 ==============
@@ -53,28 +57,31 @@ claimable state.
 
 #. Forcefully delete jobs that have been failing continuously after a given
    number of conductor attempts. This can be either done manually or
-   automatically via scripts (or other associated monitoring).
+   automatically via scripts (or other associated monitoring) or via
+   the jobboards :py:func:`~taskflow.jobs.base.JobBoard.trash` method.
 #. Resolve the internal error's cause (storage backend failure, other...).
-#. Help implement `jobboard garbage binning`_.
-
-.. _jobboard garbage binning: https://blueprints.launchpad.net/taskflow/+spec/jobboard-garbage-bin
 
 Interfaces
 ==========
 
 .. automodule:: taskflow.conductors.base
+.. automodule:: taskflow.conductors.backends
 
 Implementations
 ===============
 
-.. automodule:: taskflow.conductors.single_threaded
+Blocking
+--------
+
+.. automodule:: taskflow.conductors.backends.impl_blocking
 
 Hierarchy
 =========
 
 .. inheritance-diagram::
     taskflow.conductors.base
-    taskflow.conductors.single_threaded
+    taskflow.conductors.backends.impl_blocking
     :parts: 1
 
+.. _musical conductors: http://en.wikipedia.org/wiki/Conducting
 .. _railroad conductors: http://en.wikipedia.org/wiki/Conductor_%28transportation%29

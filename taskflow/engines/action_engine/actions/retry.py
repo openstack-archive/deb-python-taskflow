@@ -14,13 +14,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import futurist
+
 from taskflow.engines.action_engine.actions import base
 from taskflow.engines.action_engine import executor as ex
 from taskflow import logging
 from taskflow import retry as retry_atom
 from taskflow import states
 from taskflow.types import failure
-from taskflow.types import futures
 
 LOG = logging.getLogger(__name__)
 
@@ -44,20 +45,14 @@ def _revert_retry(retry, arguments):
 class RetryAction(base.Action):
     """An action that handles executing, state changes, ... of retry atoms."""
 
-    def __init__(self, storage, notifier, walker_factory):
-        super(RetryAction, self).__init__(storage, notifier, walker_factory)
-        self._executor = futures.SynchronousExecutor()
-
-    @staticmethod
-    def handles(atom):
-        return isinstance(atom, retry_atom.Retry)
+    def __init__(self, storage, notifier):
+        super(RetryAction, self).__init__(storage, notifier)
+        self._executor = futurist.SynchronousExecutor()
 
     def _get_retry_args(self, retry, addons=None):
-        scope_walker = self._walker_factory(retry)
         arguments = self._storage.fetch_mapped_args(
             retry.rebind,
             atom_name=retry.name,
-            scope_walker=scope_walker,
             optional_args=retry.optional
         )
         history = self._storage.get_retry_history(retry.name)

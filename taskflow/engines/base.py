@@ -17,12 +17,10 @@
 
 import abc
 
+from debtcollector import moves
 import six
 
-from taskflow import storage
 from taskflow.types import notifier
-from taskflow.utils import deprecation
-from taskflow.utils import misc
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -56,10 +54,18 @@ class Engine(object):
         return self._notifier
 
     @property
-    @deprecation.moved_property('atom_notifier', version="0.6",
-                                removal_version="?")
+    @moves.moved_property('atom_notifier', version="0.6",
+                          removal_version="2.0")
     def task_notifier(self):
-        """The task notifier."""
+        """The task notifier.
+
+        .. deprecated:: 0.6
+
+            The property is **deprecated** and is present for
+            backward compatibility **only**. In order to access this
+            property going forward the :py:attr:`.atom_notifier` should
+            be used instead.
+        """
         return self._atom_notifier
 
     @property
@@ -72,10 +78,9 @@ class Engine(object):
         """The options that were passed to this engine on construction."""
         return self._options
 
-    @misc.cachedproperty
+    @abc.abstractproperty
     def storage(self):
-        """The storage unit for this flow."""
-        return storage.Storage(self._flow_detail, backend=self._backend)
+        """The storage unit for this engine."""
 
     @abc.abstractmethod
     def compile(self):
@@ -92,9 +97,18 @@ class Engine(object):
         """Performs any pre-run, but post-compilation actions.
 
         NOTE(harlowja): During preparation it is currently assumed that the
-        underlying storage will be initialized, all final dependencies
-        will be verified, the tasks will be reset and the engine will enter
-        the PENDING state.
+        underlying storage will be initialized, the atoms will be reset and
+        the engine will enter the PENDING state.
+        """
+
+    @abc.abstractmethod
+    def validate(self):
+        """Performs any pre-run, post-prepare validation actions.
+
+        NOTE(harlowja): During validation all final dependencies
+        will be verified and ensured. This will by default check that all
+        atoms have satisfiable requirements (satisfied by some other
+        provider).
         """
 
     @abc.abstractmethod
@@ -105,15 +119,13 @@ class Engine(object):
     def suspend(self):
         """Attempts to suspend the engine.
 
-        If the engine is currently running tasks then this will attempt to
-        suspend future work from being started (currently active tasks can
+        If the engine is currently running atoms then this will attempt to
+        suspend future work from being started (currently active atoms can
         not currently be preempted) and move the engine into a suspend state
         which can then later be resumed from.
         """
 
 
 # TODO(harlowja): remove in 0.7 or later...
-EngineBase = deprecation.moved_inheritable_class(Engine,
-                                                 'EngineBase', __name__,
-                                                 version="0.6",
-                                                 removal_version="?")
+EngineBase = moves.moved_class(Engine, 'EngineBase', __name__,
+                               version="0.6", removal_version="2.0")

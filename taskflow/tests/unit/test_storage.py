@@ -21,7 +21,7 @@ from oslo_utils import uuidutils
 
 from taskflow import exceptions
 from taskflow.persistence import backends
-from taskflow.persistence import logbook
+from taskflow.persistence import models
 from taskflow import states
 from taskflow import storage
 from taskflow import test
@@ -61,7 +61,7 @@ class StorageTestMixin(object):
         self.assertTrue(uuidutils.is_uuid_like(s.get_atom_uuid('my_task')))
 
     def test_flow_name_and_uuid(self):
-        flow_detail = logbook.FlowDetail(name='test-fd', uuid='aaaa')
+        flow_detail = models.FlowDetail(name='test-fd', uuid='aaaa')
         s = self._get_storage(flow_detail)
         self.assertEqual(s.flow_name, 'test-fd')
         self.assertEqual(s.flow_uuid, 'aaaa')
@@ -97,14 +97,14 @@ class StorageTestMixin(object):
 
     def test_get_without_save(self):
         _lb, flow_detail = p_utils.temporary_flow_detail(self.backend)
-        td = logbook.TaskDetail(name='my_task', uuid='42')
+        td = models.TaskDetail(name='my_task', uuid='42')
         flow_detail.add(td)
         s = self._get_storage(flow_detail)
         self.assertEqual('42', s.get_atom_uuid('my_task'))
 
     def test_ensure_existing_task(self):
         _lb, flow_detail = p_utils.temporary_flow_detail(self.backend)
-        td = logbook.TaskDetail(name='my_task', uuid='42')
+        td = models.TaskDetail(name='my_task', uuid='42')
         flow_detail.add(td)
         s = self._get_storage(flow_detail)
         s.ensure_atom(test_utils.NoopTask('my_task'))
@@ -199,6 +199,12 @@ class StorageTestMixin(object):
         self.assertRaisesRegexp(exceptions.NotFound,
                                 "^Name 'xxx' is not mapped",
                                 s.fetch, 'xxx')
+
+    def test_flow_metadata_update(self):
+        s = self._get_storage()
+        update_with = {'test_data': True}
+        s.update_flow_metadata(update_with)
+        self.assertTrue(s._flowdetail.meta['test_data'])
 
     def test_task_metadata_update_with_none(self):
         s = self._get_storage()
@@ -517,7 +523,7 @@ class StorageTestMixin(object):
     def test_logbook_get_unknown_atom_type(self):
         self.assertRaisesRegexp(TypeError,
                                 'Unknown atom',
-                                logbook.atom_detail_class, 'some_detail')
+                                models.atom_detail_class, 'some_detail')
 
     def test_save_task_intention(self):
         s = self._get_storage()
@@ -532,6 +538,31 @@ class StorageTestMixin(object):
         s.set_atom_intention('my retry', states.RETRY)
         intention = s.get_atom_intention('my retry')
         self.assertEqual(intention, states.RETRY)
+
+    def test_inject_persistent_missing(self):
+        t = test_utils.ProgressingTask('my retry', requires=['x'])
+        s = self._get_storage()
+        s.ensure_atom(t)
+        missing = s.fetch_unsatisfied_args(t.name, t.rebind)
+        self.assertEqual(set(['x']), missing)
+        s.inject_atom_args(t.name, {'x': 2}, transient=False)
+        missing = s.fetch_unsatisfied_args(t.name, t.rebind)
+        self.assertEqual(set(), missing)
+        args = s.fetch_mapped_args(t.rebind, atom_name=t.name)
+        self.assertEqual(2, args['x'])
+
+    def test_inject_persistent_and_transient_missing(self):
+        t = test_utils.ProgressingTask('my retry', requires=['x'])
+        s = self._get_storage()
+        s.ensure_atom(t)
+        missing = s.fetch_unsatisfied_args(t.name, t.rebind)
+        self.assertEqual(set(['x']), missing)
+        s.inject_atom_args(t.name, {'x': 2}, transient=False)
+        s.inject_atom_args(t.name, {'x': 3}, transient=True)
+        missing = s.fetch_unsatisfied_args(t.name, t.rebind)
+        self.assertEqual(set(), missing)
+        args = s.fetch_mapped_args(t.rebind, atom_name=t.name)
+        self.assertEqual(3, args['x'])
 
 
 class StorageMemoryTest(StorageTestMixin, test.TestCase):

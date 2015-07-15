@@ -51,39 +51,50 @@ class _MachineMemory(object):
         self.done = set()
 
 
-class _MachineBuilder(object):
-    """State machine *builder* that the runner uses.
+class Runner(object):
+    """State machine *builder* + *runner* that powers the engine components.
 
-    NOTE(harlowja): the machine states that this build will for are::
+    NOTE(harlowja): the machine (states and events that will trigger
+    transitions) that this builds is represented by the following
+    table::
 
-    +--------------+------------------+------------+----------+---------+
-         Start     |      Event       |    End     | On Enter | On Exit
-    +--------------+------------------+------------+----------+---------+
-       ANALYZING   |    completed     | GAME_OVER  |          |
-       ANALYZING   |  schedule_next   | SCHEDULING |          |
-       ANALYZING   |  wait_finished   |  WAITING   |          |
-       FAILURE[$]  |                  |            |          |
-       GAME_OVER   |      failed      |  FAILURE   |          |
-       GAME_OVER   |     reverted     |  REVERTED  |          |
-       GAME_OVER   |     success      |  SUCCESS   |          |
-       GAME_OVER   |    suspended     | SUSPENDED  |          |
-        RESUMING   |  schedule_next   | SCHEDULING |          |
-      REVERTED[$]  |                  |            |          |
-       SCHEDULING  |  wait_finished   |  WAITING   |          |
-       SUCCESS[$]  |                  |            |          |
-      SUSPENDED[$] |                  |            |          |
-      UNDEFINED[^] |      start       |  RESUMING  |          |
-        WAITING    | examine_finished | ANALYZING  |          |
-    +--------------+------------------+------------+----------+---------+
+        +--------------+------------------+------------+----------+---------+
+             Start     |      Event       |    End     | On Enter | On Exit
+        +--------------+------------------+------------+----------+---------+
+           ANALYZING   |    completed     | GAME_OVER  |          |
+           ANALYZING   |  schedule_next   | SCHEDULING |          |
+           ANALYZING   |  wait_finished   |  WAITING   |          |
+           FAILURE[$]  |                  |            |          |
+           GAME_OVER   |      failed      |  FAILURE   |          |
+           GAME_OVER   |     reverted     |  REVERTED  |          |
+           GAME_OVER   |     success      |  SUCCESS   |          |
+           GAME_OVER   |    suspended     | SUSPENDED  |          |
+            RESUMING   |  schedule_next   | SCHEDULING |          |
+          REVERTED[$]  |                  |            |          |
+           SCHEDULING  |  wait_finished   |  WAITING   |          |
+           SUCCESS[$]  |                  |            |          |
+          SUSPENDED[$] |                  |            |          |
+          UNDEFINED[^] |      start       |  RESUMING  |          |
+            WAITING    | examine_finished | ANALYZING  |          |
+        +--------------+------------------+------------+----------+---------+
 
     Between any of these yielded states (minus ``GAME_OVER`` and ``UNDEFINED``)
     if the engine has been suspended or the engine has failed (due to a
     non-resolveable task failure or scheduling failure) the machine will stop
     executing new tasks (currently running tasks will be allowed to complete)
     and this machines run loop will be broken.
+
+    NOTE(harlowja): If the runtimes scheduler component is able to schedule
+    tasks in parallel, this enables parallel running and/or reversion.
     """
 
+    # Informational states this action yields while running, not useful to
+    # have the engine record but useful to provide to end-users when doing
+    # execution iterations.
+    ignorable_states = (st.SCHEDULING, st.WAITING, st.RESUMING, st.ANALYZING)
+
     def __init__(self, runtime, waiter):
+        self._runtime = runtime
         self._analyzer = runtime.analyzer
         self._completer = runtime.completer
         self._scheduler = runtime.scheduler
@@ -91,12 +102,28 @@ class _MachineBuilder(object):
         self._waiter = waiter
 
     def runnable(self):
+        """Checks if the storage says the flow is still runnable/running."""
         return self._storage.get_flow_state() == st.RUNNING
 
     def build(self, timeout=None):
+        """Builds a state-machine (that can be/is used during running)."""
+
         memory = _MachineMemory()
         if timeout is None:
             timeout = _WAITING_TIMEOUT
+
+        # Cache some local functions/methods...
+        do_schedule = self._scheduler.schedule
+        wait_for_any = self._waiter.wait_for_any
+        do_complete = self._completer.complete
+
+        def iter_next_nodes(target_node=None):
+            # Yields and filters and tweaks the next nodes to execute...
+            maybe_nodes = self._analyzer.get_next_nodes(node=target_node)
+            for node, late_decider in maybe_nodes:
+                proceed = late_decider.check_and_affect(self._runtime)
+                if proceed:
+                    yield node
 
         def resume(old_state, new_state, event):
             # This reaction function just updates the state machines memory
@@ -104,7 +131,7 @@ class _MachineBuilder(object):
             # attempt, which may be empty if never ran before) and any nodes
             # that are now ready to be ran.
             memory.next_nodes.update(self._completer.resume())
-            memory.next_nodes.update(self._analyzer.get_next_nodes())
+            memory.next_nodes.update(iter_next_nodes())
             return _SCHEDULE
 
         def game_over(old_state, new_state, event):
@@ -114,7 +141,7 @@ class _MachineBuilder(object):
             # it is *always* called before the final state is entered.
             if memory.failures:
                 return _FAILED
-            if self._analyzer.get_next_nodes():
+            if any(1 for node in iter_next_nodes()):
                 return _SUSPENDED
             elif self._analyzer.is_success():
                 return _SUCCESS
@@ -128,8 +155,7 @@ class _MachineBuilder(object):
             # that holds this information to stop or suspend); handles failures
             # that occur during this process safely...
             if self.runnable() and memory.next_nodes:
-                not_done, failures = self._scheduler.schedule(
-                    memory.next_nodes)
+                not_done, failures = do_schedule(memory.next_nodes)
                 if not_done:
                     memory.not_done.update(not_done)
                 if failures:
@@ -142,8 +168,7 @@ class _MachineBuilder(object):
             # call sometime in the future, or equivalent that will work in
             # py2 and py3.
             if memory.not_done:
-                done, not_done = self._waiter.wait_for_any(memory.not_done,
-                                                           timeout)
+                done, not_done = wait_for_any(memory.not_done, timeout)
                 memory.done.update(done)
                 memory.not_done = not_done
             return _ANALYZE
@@ -160,7 +185,7 @@ class _MachineBuilder(object):
                 node = fut.atom
                 try:
                     event, result = fut.result()
-                    retain = self._completer.complete(node, event, result)
+                    retain = do_complete(node, event, result)
                     if isinstance(result, failure.Failure):
                         if retain:
                             memory.failures.append(result)
@@ -183,7 +208,7 @@ class _MachineBuilder(object):
                     memory.failures.append(failure.Failure())
                 else:
                     try:
-                        more_nodes = self._analyzer.get_next_nodes(node)
+                        more_nodes = set(iter_next_nodes(target_node=node))
                     except Exception:
                         memory.failures.append(failure.Failure())
                     else:
@@ -204,10 +229,10 @@ class _MachineBuilder(object):
             LOG.debug("Entering new state '%s' in response to event '%s'",
                       new_state, event)
 
-        # NOTE(harlowja): when ran in debugging mode it is quite useful
+        # NOTE(harlowja): when ran in blather mode it is quite useful
         # to track the various state transitions as they happen...
         watchers = {}
-        if LOG.isEnabledFor(logging.DEBUG):
+        if LOG.isEnabledFor(logging.BLATHER):
             watchers['on_exit'] = on_exit
             watchers['on_enter'] = on_enter
 
@@ -244,38 +269,9 @@ class _MachineBuilder(object):
         m.freeze()
         return (m, memory)
 
-
-class Runner(object):
-    """Runner that iterates while executing nodes using the given runtime.
-
-    This runner acts as the action engine run loop/state-machine, it resumes
-    the workflow, schedules all task it can for execution using the runtimes
-    scheduler and analyzer components, and than waits on returned futures and
-    then activates the runtimes completion component to finish up those tasks
-    and so on...
-
-    NOTE(harlowja): If the runtimes scheduler component is able to schedule
-    tasks in parallel, this enables parallel running and/or reversion.
-    """
-
-    # Informational states this action yields while running, not useful to
-    # have the engine record but useful to provide to end-users when doing
-    # execution iterations.
-    ignorable_states = (st.SCHEDULING, st.WAITING, st.RESUMING, st.ANALYZING)
-
-    def __init__(self, runtime, waiter):
-        self._builder = _MachineBuilder(runtime, waiter)
-
-    @property
-    def builder(self):
-        return self._builder
-
-    def runnable(self):
-        return self._builder.runnable()
-
     def run_iter(self, timeout=None):
-        """Runs the nodes using a built state machine."""
-        machine, memory = self.builder.build(timeout=timeout)
+        """Runs iteratively using a locally built state machine."""
+        machine, memory = self.build(timeout=timeout)
         for (_prior_state, new_state) in machine.run_iter(_START):
             # NOTE(harlowja): skip over meta-states.
             if new_state not in _META_STATES:

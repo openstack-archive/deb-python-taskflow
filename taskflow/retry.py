@@ -17,16 +17,38 @@
 
 import abc
 
+import enum
 import six
 
 from taskflow import atom
 from taskflow import exceptions as exc
 from taskflow.utils import misc
 
-# Decision results.
-REVERT = "REVERT"
-REVERT_ALL = "REVERT_ALL"
-RETRY = "RETRY"
+
+@enum.unique
+class Decision(misc.StrEnum):
+    """Decision results/strategy enumeration."""
+
+    REVERT = "REVERT"
+    """Reverts only the surrounding/associated subflow.
+
+    This strategy first consults the parent atom before reverting the
+    associated subflow to determine if the parent retry object provides a
+    different reconciliation strategy (if no parent retry object exists
+    then reverting will proceed, if one does exist the parent retry may
+    override this reconciliation strategy with its own).
+    """
+
+    #: Completely reverts the whole flow.
+    REVERT_ALL = "REVERT_ALL"
+
+    #: Retries the surrounding/associated subflow again.
+    RETRY = "RETRY"
+
+# Retain these aliases for a number of releases...
+REVERT = Decision.REVERT
+REVERT_ALL = Decision.REVERT_ALL
+RETRY = Decision.RETRY
 
 # Constants passed into revert/execute kwargs.
 #
@@ -108,14 +130,16 @@ class Retry(atom.Atom):
 
     This abstract base class is used to inherit from and provide different
     strategies that will be activated upon execution failures. Since a retry
-    object is an atom it may also provide :meth:`.execute` and
-    :meth:`.revert` methods to alter the inputs of connected atoms (depending
-    on the desired strategy to be used this can be quite useful).
+    object is an atom it may also provide :meth:`~taskflow.retry.Retry.execute`
+    and :meth:`~taskflow.retry.Retry.revert` methods to alter the inputs of
+    connected atoms (depending on the desired strategy to be used this can be
+    quite useful).
 
-    NOTE(harlowja): the :meth:`.execute` and :meth:`.revert` and
-    :meth:`.on_failure` will automatically be given a ``history`` parameter,
-    which contains information about the past decisions and outcomes
-    that have occurred (if available).
+    NOTE(harlowja): the :meth:`~taskflow.retry.Retry.execute` and
+    :meth:`~taskflow.retry.Retry.revert` and
+    :meth:`~taskflow.retry.Retry.on_failure` will automatically be given
+    a ``history`` parameter, which contains information about the past
+    decisions and outcomes that have occurred (if available).
     """
 
     default_provides = None
@@ -217,15 +241,20 @@ class Times(Retry):
     """Retries subflow given number of times. Returns attempt number."""
 
     def __init__(self, attempts=1, name=None, provides=None, requires=None,
-                 auto_extract=True, rebind=None):
+                 auto_extract=True, rebind=None, revert_all=False):
         super(Times, self).__init__(name, provides, requires,
                                     auto_extract, rebind)
         self._attempts = attempts
 
+        if revert_all:
+            self._revert_action = REVERT_ALL
+        else:
+            self._revert_action = REVERT
+
     def on_failure(self, history, *args, **kwargs):
         if len(history) < self._attempts:
             return RETRY
-        return REVERT
+        return self._revert_action
 
     def execute(self, history, *args, **kwargs):
         return len(history) + 1
@@ -233,6 +262,16 @@ class Times(Retry):
 
 class ForEachBase(Retry):
     """Base class for retries that iterate over a given collection."""
+
+    def __init__(self, name=None, provides=None, requires=None,
+                 auto_extract=True, rebind=None, revert_all=False):
+        super(ForEachBase, self).__init__(name, provides, requires,
+                                          auto_extract, rebind)
+
+        if revert_all:
+            self._revert_action = REVERT_ALL
+        else:
+            self._revert_action = REVERT
 
     def _get_next_value(self, values, history):
         # Fetches the next resolution result to try, removes overlapping
@@ -248,7 +287,7 @@ class ForEachBase(Retry):
         try:
             self._get_next_value(values, history)
         except exc.NotFound:
-            return REVERT
+            return self._revert_action
         else:
             return RETRY
 
@@ -261,9 +300,9 @@ class ForEach(ForEachBase):
     """
 
     def __init__(self, values, name=None, provides=None, requires=None,
-                 auto_extract=True, rebind=None):
+                 auto_extract=True, rebind=None, revert_all=False):
         super(ForEach, self).__init__(name, provides, requires,
-                                      auto_extract, rebind)
+                                      auto_extract, rebind, revert_all)
         self._values = values
 
     def on_failure(self, history, *args, **kwargs):
@@ -282,6 +321,12 @@ class ParameterizedForEach(ForEachBase):
     storage) as a parameter and returns the next element of that collection on
     each try.
     """
+
+    def __init__(self, name=None, provides=None, requires=None,
+                 auto_extract=True, rebind=None, revert_all=False):
+        super(ParameterizedForEach, self).__init__(name, provides, requires,
+                                                   auto_extract, rebind,
+                                                   revert_all)
 
     def on_failure(self, values, history, *args, **kwargs):
         return self._on_failure(values, history)

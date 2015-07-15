@@ -33,11 +33,6 @@ Kombu
 
 .. automodule:: taskflow.utils.kombu_utils
 
-Locks
-~~~~~
-
-.. automodule:: taskflow.utils.lock_utils
-
 Miscellaneous
 ~~~~~~~~~~~~~
 
@@ -47,6 +42,16 @@ Persistence
 ~~~~~~~~~~~
 
 .. automodule:: taskflow.utils.persistence_utils
+
+Redis
+~~~~~
+
+.. automodule:: taskflow.utils.redis_utils
+
+Schema
+~~~~~~
+
+.. automodule:: taskflow.utils.schema_utils
 
 Threading
 ~~~~~~~~~

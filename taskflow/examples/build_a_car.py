@@ -38,7 +38,7 @@ ANY = notifier.Notifier.ANY
 import example_utils as eu  # noqa
 
 
-# INTRO: This examples shows how a graph flow and linear flow can be used
+# INTRO: This example shows how a graph flow and linear flow can be used
 # together to execute dependent & non-dependent tasks by going through the
 # steps required to build a simplistic car (an assembly line if you will). It
 # also shows how raw functions can be wrapped into a task object instead of
@@ -167,7 +167,7 @@ engine = taskflow.engines.load(flow, store={'spec': spec.copy()})
 # flow_watch function for flow state transitions, and registers the
 # same all (ANY) state transitions for task state transitions.
 engine.notifier.register(ANY, flow_watch)
-engine.task_notifier.register(ANY, task_watch)
+engine.atom_notifier.register(ANY, task_watch)
 
 eu.print_wrapped("Building a car")
 engine.run()
@@ -180,7 +180,7 @@ spec['doors'] = 5
 
 engine = taskflow.engines.load(flow, store={'spec': spec.copy()})
 engine.notifier.register(ANY, flow_watch)
-engine.task_notifier.register(ANY, task_watch)
+engine.atom_notifier.register(ANY, task_watch)
 
 eu.print_wrapped("Building a wrong car that doesn't match specification")
 try:

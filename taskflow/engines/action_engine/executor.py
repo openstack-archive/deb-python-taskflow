@@ -19,7 +19,9 @@ import collections
 from multiprocessing import managers
 import os
 import pickle
+import threading
 
+import futurist
 from oslo_utils import excutils
 from oslo_utils import reflection
 from oslo_utils import timeutils
@@ -30,9 +32,7 @@ from six.moves import queue as compat_queue
 from taskflow import logging
 from taskflow import task as task_atom
 from taskflow.types import failure
-from taskflow.types import futures
 from taskflow.types import notifier
-from taskflow.types import timing
 from taskflow.utils import async_utils
 from taskflow.utils import threading_utils
 
@@ -175,7 +175,7 @@ class _WaitWorkItem(object):
                 'kind': _KIND_COMPLETE_ME,
             }
             if self._channel.put(message):
-                watch = timing.StopWatch()
+                watch = timeutils.StopWatch()
                 watch.start()
                 self._barrier.wait()
                 LOG.blather("Waited %s seconds until task '%s' %s emitted"
@@ -240,7 +240,7 @@ class _Dispatcher(object):
             raise ValueError("Provided dispatch periodicity must be greater"
                              " than zero and not '%s'" % dispatch_periodicity)
         self._targets = {}
-        self._dead = threading_utils.Event()
+        self._dead = threading.Event()
         self._dispatch_periodicity = dispatch_periodicity
         self._stop_when_empty = False
 
@@ -304,7 +304,7 @@ class _Dispatcher(object):
                      " %s to target '%s'", kind, sender, target)
 
     def run(self, queue):
-        watch = timing.StopWatch(duration=self._dispatch_periodicity)
+        watch = timeutils.StopWatch(duration=self._dispatch_periodicity)
         while (not self._dead.is_set() or
                (self._stop_when_empty and self._targets)):
             watch.restart()
@@ -347,18 +347,16 @@ class TaskExecutor(object):
 
     def start(self):
         """Prepare to execute tasks."""
-        pass
 
     def stop(self):
         """Finalize task executor."""
-        pass
 
 
 class SerialTaskExecutor(TaskExecutor):
     """Executes tasks one after another."""
 
     def __init__(self):
-        self._executor = futures.SynchronousExecutor()
+        self._executor = futurist.SynchronousExecutor()
 
     def start(self):
         self._executor.restart()
@@ -417,11 +415,8 @@ class ParallelTaskExecutor(TaskExecutor):
 
     def start(self):
         if self._own_executor:
-            if self._max_workers is not None:
-                max_workers = self._max_workers
-            else:
-                max_workers = threading_utils.get_optimal_thread_count()
-            self._executor = self._create_executor(max_workers=max_workers)
+            self._executor = self._create_executor(
+                max_workers=self._max_workers)
 
     def stop(self):
         if self._own_executor:
@@ -433,7 +428,7 @@ class ParallelThreadTaskExecutor(ParallelTaskExecutor):
     """Executes tasks in parallel using a thread pool executor."""
 
     def _create_executor(self, max_workers=None):
-        return futures.ThreadPoolExecutor(max_workers=max_workers)
+        return futurist.ThreadPoolExecutor(max_workers=max_workers)
 
 
 class ParallelProcessTaskExecutor(ParallelTaskExecutor):
@@ -463,7 +458,7 @@ class ParallelProcessTaskExecutor(ParallelTaskExecutor):
         self._queue = None
 
     def _create_executor(self, max_workers=None):
-        return futures.ProcessPoolExecutor(max_workers=max_workers)
+        return futurist.ProcessPoolExecutor(max_workers=max_workers)
 
     def start(self):
         if threading_utils.is_alive(self._worker):

@@ -15,31 +15,12 @@
 #    under the License.
 
 import collections
-import multiprocessing
-import sys
 import threading
 
 import six
 from six.moves import _thread
 
-
-if sys.version_info[0:2] == (2, 6):
-    # This didn't return that was/wasn't set in 2.6, since we actually care
-    # whether it did or didn't add that feature by taking the code from 2.7
-    # that added this functionality...
-    #
-    # TODO(harlowja): remove when we can drop 2.6 support.
-    class Event(threading._Event):
-        def wait(self, timeout=None):
-            self.__cond.acquire()
-            try:
-                if not self.__flag:
-                    self.__cond.wait(timeout)
-                return self.__flag
-            finally:
-                self.__cond.release()
-else:
-    Event = threading.Event
+from taskflow.utils import misc
 
 
 def is_alive(thread):
@@ -52,17 +33,6 @@ def is_alive(thread):
 def get_ident():
     """Return the 'thread identifier' of the current thread."""
     return _thread.get_ident()
-
-
-def get_optimal_thread_count():
-    """Try to guess optimal thread count for current system."""
-    try:
-        return multiprocessing.cpu_count() + 1
-    except NotImplementedError:
-        # NOTE(harlowja): apparently may raise so in this case we will
-        # just setup two threads since it's hard to know what else we
-        # should do in this situation.
-        return 2
 
 
 def daemon_thread(target, *args, **kwargs):
@@ -80,14 +50,17 @@ _ThreadBuilder = collections.namedtuple('_ThreadBuilder',
                                         ['thread_factory',
                                          'before_start', 'after_start',
                                          'before_join', 'after_join'])
-_ThreadBuilder.callables = tuple([
-    # Attribute name -> none allowed as a valid value...
-    ('thread_factory', False),
-    ('before_start', True),
-    ('after_start', True),
-    ('before_join', True),
-    ('after_join', True),
+_ThreadBuilder.fields = tuple([
+    'thread_factory',
+    'before_start',
+    'after_start',
+    'before_join',
+    'after_join',
 ])
+
+
+def no_op(*args, **kwargs):
+    """Function that does nothing."""
 
 
 class ThreadBundle(object):
@@ -108,13 +81,19 @@ class ThreadBundle(object):
                         in dead-lock since the lock on this object is not
                         meant to be (and is not) reentrant...
         """
+        if before_start is None:
+            before_start = no_op
+        if after_start is None:
+            after_start = no_op
+        if before_join is None:
+            before_join = no_op
+        if after_join is None:
+            after_join = no_op
         builder = _ThreadBuilder(thread_factory,
                                  before_start, after_start,
                                  before_join, after_join)
-        for attr_name, none_allowed in builder.callables:
+        for attr_name in builder.fields:
             cb = getattr(builder, attr_name)
-            if cb is None and none_allowed:
-                continue
             if not six.callable(cb):
                 raise ValueError("Provided callback for argument"
                                  " '%s' must be callable" % attr_name)
@@ -128,25 +107,21 @@ class ThreadBundle(object):
                 False,
             ])
 
-    @staticmethod
-    def _trigger_callback(callback, thread):
-        if callback is not None:
-            callback(thread)
-
     def start(self):
         """Creates & starts all associated threads (that are not running)."""
         count = 0
         with self._lock:
-            for i, (builder, thread, started) in enumerate(self._threads):
+            it = enumerate(self._threads)
+            for i, (builder, thread, started) in it:
                 if thread and started:
                     continue
                 if not thread:
                     self._threads[i][1] = thread = builder.thread_factory()
-                self._trigger_callback(builder.before_start, thread)
+                builder.before_start(thread)
                 thread.start()
                 count += 1
                 try:
-                    self._trigger_callback(builder.after_start, thread)
+                    builder.after_start(thread)
                 finally:
                     # Just incase the 'after_start' callback blows up make sure
                     # we always set this...
@@ -157,14 +132,15 @@ class ThreadBundle(object):
         """Stops & joins all associated threads (that have been started)."""
         count = 0
         with self._lock:
-            for i, (builder, thread, started) in enumerate(self._threads):
+            it = misc.reverse_enumerate(self._threads)
+            for i, (builder, thread, started) in it:
                 if not thread or not started:
                     continue
-                self._trigger_callback(builder.before_join, thread)
+                builder.before_join(thread)
                 thread.join()
                 count += 1
                 try:
-                    self._trigger_callback(builder.after_join, thread)
+                    builder.after_join(thread)
                 finally:
                     # Just incase the 'after_join' callback blows up make sure
                     # we always set/reset these...

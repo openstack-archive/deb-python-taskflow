@@ -30,7 +30,7 @@ Definitions
 Jobs
   A :py:class:`job <taskflow.jobs.base.Job>` consists of a unique identifier,
   name, and a reference to a :py:class:`logbook
-  <taskflow.persistence.logbook.LogBook>` which contains the details of the
+  <taskflow.persistence.models.LogBook>` which contains the details of the
   work that has been or should be/will be completed to finish the work that has
   been created for that job.
 
@@ -43,7 +43,7 @@ Jobboards
   jobboards implement the same interface and semantics so that the backend
   usage is as transparent as possible. This allows deployers or developers of a
   service that uses TaskFlow to select a jobboard implementation that fits
-  their setup (and there intended usage) best.
+  their setup (and their intended usage) best.
 
 High level architecture
 =======================
@@ -62,7 +62,8 @@ Features
     the previously partially completed work or begin initial work to ensure
     that the workflow as a whole progresses (where progressing implies
     transitioning through the workflow :doc:`patterns <patterns>` and
-    :doc:`atoms <atoms>` and completing their associated state transitions).
+    :doc:`atoms <atoms>` and completing their associated
+    :doc:`states <states>` transitions).
 
 - Atomic transfer and single ownership
 
@@ -94,11 +95,12 @@ Features
 Usage
 =====
 
-All engines are mere classes that implement same interface, and of course it is
-possible to import them and create their instances just like with any classes
-in Python. But the easier (and recommended) way for creating jobboards is by
-using the :py:meth:`fetch() <taskflow.jobs.backends.fetch>` function which uses
-entrypoints (internally using `stevedore`_) to fetch and configure your backend
+All jobboards are mere classes that implement same interface, and of course
+it is possible to import them and create instances of them just like with any
+other class in Python. But the easier (and recommended) way for creating
+jobboards is by using the :py:meth:`fetch() <taskflow.jobs.backends.fetch>`
+function which uses entrypoints (internally using `stevedore`_) to fetch and
+configure your backend.
 
 Using this function the typical creation of a jobboard (and an example posting
 of a job) might look like:
@@ -200,11 +202,25 @@ Additional *configuration* parameters:
 * ``handler``: a class that provides ``kazoo.handlers``-like interface; it will
   be used internally by `kazoo`_ to perform asynchronous operations, useful
   when your program uses eventlet and you want to instruct kazoo to use an
-  eventlet compatible handler (such as the `eventlet handler`_).
+  eventlet compatible handler.
 
 .. note::
 
     See :py:class:`~taskflow.jobs.backends.impl_zookeeper.ZookeeperJobBoard`
+    for implementation details.
+
+Redis
+-----
+
+**Board type**: ``'redis'``
+
+Uses `redis`_ to provide the jobboard capabilities and semantics by using
+a redis hash datastructure and individual job ownership keys (that can
+optionally expire after a given amount of time).
+
+.. note::
+
+    See :py:class:`~taskflow.jobs.backends.impl_redis.RedisJobBoard`
     for implementation details.
 
 Considerations
@@ -218,7 +234,7 @@ Dual-engine jobs
 ----------------
 
 **What:** Since atoms and engines are not currently `preemptable`_ we can not
-force a engine (or the threads/remote workers... it is using to run) to stop
+force an engine (or the threads/remote workers... it is using to run) to stop
 working on an atom (it is general bad behavior to force code to stop without
 its consent anyway) if it has already started working on an atom (short of
 doing a ``kill -9`` on the running interpreter).  This could cause problems
@@ -265,18 +281,27 @@ Interfaces
 Implementations
 ===============
 
+Zookeeper
+---------
+
 .. automodule:: taskflow.jobs.backends.impl_zookeeper
+
+Redis
+-----
+
+.. automodule:: taskflow.jobs.backends.impl_redis
 
 Hierarchy
 =========
 
 .. inheritance-diagram::
     taskflow.jobs.base
+    taskflow.jobs.backends.impl_redis
     taskflow.jobs.backends.impl_zookeeper
     :parts: 1
 
 .. _paradigm shift: https://wiki.openstack.org/wiki/TaskFlow/Paradigm_shifts#Workflow_ownership_transfer
 .. _zookeeper: http://zookeeper.apache.org/
 .. _kazoo: http://kazoo.readthedocs.org/
-.. _eventlet handler: https://pypi.python.org/pypi/kazoo-eventlet-handler/
 .. _stevedore: http://stevedore.readthedocs.org/
+.. _redis: http://redis.io/

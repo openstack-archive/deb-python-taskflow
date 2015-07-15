@@ -16,16 +16,17 @@
 
 import functools
 
+from futurist import periodics
 from oslo_utils import timeutils
 
 from taskflow.engines.action_engine import executor
+from taskflow.engines.worker_based import dispatcher
 from taskflow.engines.worker_based import protocol as pr
 from taskflow.engines.worker_based import proxy
 from taskflow.engines.worker_based import types as wt
 from taskflow import exceptions as exc
 from taskflow import logging
 from taskflow import task as task_atom
-from taskflow.types import periodic
 from taskflow.utils import kombu_utils as ku
 from taskflow.utils import misc
 from taskflow.utils import threading_utils as tu
@@ -44,10 +45,8 @@ class WorkerTaskExecutor(executor.TaskExecutor):
         self._requests_cache = wt.RequestsCache()
         self._transition_timeout = transition_timeout
         type_handlers = {
-            pr.RESPONSE: [
-                self._process_response,
-                pr.Response.validate,
-            ],
+            pr.RESPONSE: dispatcher.Handler(self._process_response,
+                                            validator=pr.Response.validate),
         }
         self._proxy = proxy.Proxy(uuid, exchange,
                                   type_handlers=type_handlers,
@@ -68,7 +67,7 @@ class WorkerTaskExecutor(executor.TaskExecutor):
         self._helpers.bind(lambda: tu.daemon_thread(self._proxy.start),
                            after_start=lambda t: self._proxy.wait(),
                            before_join=lambda t: self._proxy.stop())
-        p_worker = periodic.PeriodicWorker.create([self._finder])
+        p_worker = periodics.PeriodicWorker.create([self._finder])
         if p_worker:
             self._helpers.bind(lambda: tu.daemon_thread(p_worker.start),
                                before_join=lambda t: p_worker.stop(),

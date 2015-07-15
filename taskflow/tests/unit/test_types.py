@@ -14,40 +14,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import time
-
 import networkx as nx
 import six
+from six.moves import cPickle as pickle
 
 from taskflow import exceptions as excp
 from taskflow import test
 from taskflow.types import fsm
 from taskflow.types import graph
-from taskflow.types import latch
-from taskflow.types import periodic
+from taskflow.types import sets
 from taskflow.types import table
-from taskflow.types import timing as tt
 from taskflow.types import tree
-from taskflow.utils import threading_utils as tu
-
-
-class PeriodicThingy(object):
-    def __init__(self):
-        self.capture = []
-
-    @periodic.periodic(0.01)
-    def a(self):
-        self.capture.append('a')
-
-    @periodic.periodic(0.02)
-    def b(self):
-        self.capture.append('b')
-
-    def c(self):
-        pass
-
-    def d(self):
-        pass
 
 
 class GraphTest(test.TestCase):
@@ -77,6 +54,71 @@ class GraphTest(test.TestCase):
         g.add_node("b")
         g.freeze()
         self.assertRaises(nx.NetworkXError, g.add_node, "c")
+
+    def test_merge(self):
+        g = graph.DiGraph()
+        g.add_node("a")
+        g.add_node("b")
+
+        g2 = graph.DiGraph()
+        g2.add_node('c')
+
+        g3 = graph.merge_graphs(g, g2)
+        self.assertEqual(3, len(g3))
+
+    def test_merge_edges(self):
+        g = graph.DiGraph()
+        g.add_node("a")
+        g.add_node("b")
+        g.add_edge('a', 'b')
+
+        g2 = graph.DiGraph()
+        g2.add_node('c')
+        g2.add_node('d')
+        g2.add_edge('c', 'd')
+
+        g3 = graph.merge_graphs(g, g2)
+        self.assertEqual(4, len(g3))
+        self.assertTrue(g3.has_edge('c', 'd'))
+        self.assertTrue(g3.has_edge('a', 'b'))
+
+    def test_overlap_detector(self):
+        g = graph.DiGraph()
+        g.add_node("a")
+        g.add_node("b")
+        g.add_edge('a', 'b')
+
+        g2 = graph.DiGraph()
+        g2.add_node('a')
+        g2.add_node('d')
+        g2.add_edge('a', 'd')
+
+        self.assertRaises(ValueError,
+                          graph.merge_graphs, g, g2)
+
+        def occurence_detector(to_graph, from_graph):
+            return sum(1 for node in from_graph.nodes_iter()
+                       if node in to_graph)
+
+        self.assertRaises(ValueError,
+                          graph.merge_graphs, g, g2,
+                          overlap_detector=occurence_detector)
+
+        g3 = graph.merge_graphs(g, g2, allow_overlaps=True)
+        self.assertEqual(3, len(g3))
+        self.assertTrue(g3.has_edge('a', 'b'))
+        self.assertTrue(g3.has_edge('a', 'd'))
+
+    def test_invalid_detector(self):
+        g = graph.DiGraph()
+        g.add_node("a")
+
+        g2 = graph.DiGraph()
+        g2.add_node('c')
+
+        self.assertRaises(ValueError,
+                          graph.merge_graphs, g, g2,
+                          overlap_detector='b')
 
 
 class TreeTest(test.TestCase):
@@ -113,6 +155,44 @@ class TreeTest(test.TestCase):
         root = tree.Node("josh")
         self.assertTrue(root.empty())
 
+    def test_removal(self):
+        root = self._make_species()
+        self.assertIsNotNone(root.remove('reptile'))
+        self.assertRaises(ValueError, root.remove, 'reptile')
+        self.assertIsNone(root.find('reptile'))
+
+    def test_removal_direct(self):
+        root = self._make_species()
+        self.assertRaises(ValueError, root.remove, 'human',
+                          only_direct=True)
+
+    def test_removal_self(self):
+        root = self._make_species()
+        n = root.find('horse')
+        self.assertIsNotNone(n.parent)
+        n.remove('horse', include_self=True)
+        self.assertIsNone(n.parent)
+        self.assertIsNone(root.find('horse'))
+
+    def test_disassociate(self):
+        root = self._make_species()
+        n = root.find('horse')
+        self.assertIsNotNone(n.parent)
+        c = n.disassociate()
+        self.assertEqual(1, c)
+        self.assertIsNone(n.parent)
+        self.assertIsNone(root.find('horse'))
+
+    def test_disassociate_many(self):
+        root = self._make_species()
+        n = root.find('horse')
+        n.parent.add(n)
+        n.parent.add(n)
+        c = n.disassociate()
+        self.assertEqual(3, c)
+        self.assertIsNone(n.parent)
+        self.assertIsNone(root.find('horse'))
+
     def test_not_empty(self):
         root = self._make_species()
         self.assertFalse(root.empty())
@@ -135,6 +215,16 @@ class TreeTest(test.TestCase):
         root = self._make_species()
         root.freeze()
         self.assertRaises(tree.FrozenNode, root.add, "bird")
+
+    def test_find(self):
+        root = self._make_species()
+        self.assertIsNone(root.find('monkey', only_direct=True))
+        self.assertIsNotNone(root.find('monkey', only_direct=False))
+        self.assertIsNotNone(root.find('animal', only_direct=True))
+        self.assertIsNotNone(root.find('reptile', only_direct=True))
+        self.assertIsNone(root.find('animal', include_self=False))
+        self.assertIsNone(root.find('animal',
+                                    include_self=False, only_direct=True))
 
     def test_dfs_itr(self):
         root = self._make_species()
@@ -159,128 +249,6 @@ class TreeTest(test.TestCase):
         things = list([n.item for n in root.bfs_iter(include_self=False)])
         self.assertEqual(['reptile', 'mammal', 'primate',
                           'horse', 'human', 'monkey'], things)
-
-
-class StopWatchTest(test.TestCase):
-    def setUp(self):
-        super(StopWatchTest, self).setUp()
-        tt.StopWatch.set_now_override(now=0)
-        self.addCleanup(tt.StopWatch.clear_overrides)
-
-    def test_leftover_no_duration(self):
-        watch = tt.StopWatch()
-        watch.start()
-        self.assertRaises(RuntimeError, watch.leftover)
-        self.assertRaises(RuntimeError, watch.leftover, return_none=False)
-        self.assertIsNone(watch.leftover(return_none=True))
-
-    def test_no_states(self):
-        watch = tt.StopWatch()
-        self.assertRaises(RuntimeError, watch.stop)
-        self.assertRaises(RuntimeError, watch.resume)
-
-    def test_bad_expiry(self):
-        self.assertRaises(ValueError, tt.StopWatch, -1)
-
-    def test_backwards(self):
-        watch = tt.StopWatch(0.1)
-        watch.start()
-        tt.StopWatch.advance_time_seconds(0.5)
-        self.assertTrue(watch.expired())
-
-        tt.StopWatch.advance_time_seconds(-1.0)
-        self.assertFalse(watch.expired())
-        self.assertEqual(0.0, watch.elapsed())
-
-    def test_expiry(self):
-        watch = tt.StopWatch(0.1)
-        watch.start()
-        tt.StopWatch.advance_time_seconds(0.2)
-        self.assertTrue(watch.expired())
-
-    def test_not_expired(self):
-        watch = tt.StopWatch(0.1)
-        watch.start()
-        tt.StopWatch.advance_time_seconds(0.05)
-        self.assertFalse(watch.expired())
-
-    def test_no_expiry(self):
-        watch = tt.StopWatch(0.1)
-        self.assertRaises(RuntimeError, watch.expired)
-
-    def test_elapsed(self):
-        watch = tt.StopWatch()
-        watch.start()
-        tt.StopWatch.advance_time_seconds(0.2)
-        # NOTE(harlowja): Allow for a slight variation by using 0.19.
-        self.assertGreaterEqual(0.19, watch.elapsed())
-
-    def test_no_elapsed(self):
-        watch = tt.StopWatch()
-        self.assertRaises(RuntimeError, watch.elapsed)
-
-    def test_no_leftover(self):
-        watch = tt.StopWatch()
-        self.assertRaises(RuntimeError, watch.leftover)
-        watch = tt.StopWatch(1)
-        self.assertRaises(RuntimeError, watch.leftover)
-
-    def test_pause_resume(self):
-        watch = tt.StopWatch()
-        watch.start()
-        tt.StopWatch.advance_time_seconds(0.05)
-        watch.stop()
-        elapsed = watch.elapsed()
-        self.assertAlmostEqual(elapsed, watch.elapsed())
-        watch.resume()
-        tt.StopWatch.advance_time_seconds(0.05)
-        self.assertNotEqual(elapsed, watch.elapsed())
-
-    def test_context_manager(self):
-        with tt.StopWatch() as watch:
-            tt.StopWatch.advance_time_seconds(0.05)
-        self.assertGreater(0.01, watch.elapsed())
-
-    def test_splits(self):
-        watch = tt.StopWatch()
-        watch.start()
-        self.assertEqual(0, len(watch.splits))
-
-        watch.split()
-        self.assertEqual(1, len(watch.splits))
-        self.assertEqual(watch.splits[0].elapsed,
-                         watch.splits[0].length)
-
-        tt.StopWatch.advance_time_seconds(0.05)
-        watch.split()
-        splits = watch.splits
-        self.assertEqual(2, len(splits))
-        self.assertNotEqual(splits[0].elapsed, splits[1].elapsed)
-        self.assertEqual(splits[1].length,
-                         splits[1].elapsed - splits[0].elapsed)
-
-        watch.stop()
-        self.assertEqual(2, len(watch.splits))
-
-        watch.start()
-        self.assertEqual(0, len(watch.splits))
-
-    def test_elapsed_maximum(self):
-        watch = tt.StopWatch()
-        watch.start()
-
-        tt.StopWatch.advance_time_seconds(1)
-        self.assertEqual(1, watch.elapsed())
-
-        tt.StopWatch.advance_time_seconds(10)
-        self.assertEqual(11, watch.elapsed())
-        self.assertEqual(1, watch.elapsed(maximum=1))
-
-        watch.stop()
-        self.assertEqual(11, watch.elapsed())
-        tt.StopWatch.advance_time_seconds(10)
-        self.assertEqual(11, watch.elapsed())
-        self.assertEqual(0, watch.elapsed(maximum=-1))
 
 
 class TableTest(test.TestCase):
@@ -495,110 +463,145 @@ class FSMTest(test.TestCase):
         self.assertRaises(ValueError, m.add_state, 'b', on_exit=2)
 
 
-class PeriodicTest(test.TestCase):
+class OrderedSetTest(test.TestCase):
 
-    def test_invalid_periodic(self):
+    def test_pickleable(self):
+        items = [10, 9, 8, 7]
+        s = sets.OrderedSet(items)
+        self.assertEqual(items, list(s))
+        s_bin = pickle.dumps(s)
+        s2 = pickle.loads(s_bin)
+        self.assertEqual(s, s2)
+        self.assertEqual(items, list(s2))
 
-        def no_op():
-            pass
+    def test_retain_ordering(self):
+        items = [10, 9, 8, 7]
+        s = sets.OrderedSet(iter(items))
+        self.assertEqual(items, list(s))
 
-        self.assertRaises(ValueError, periodic.periodic, -1)
+    def test_retain_duplicate_ordering(self):
+        items = [10, 9, 10, 8, 9, 7, 8]
+        s = sets.OrderedSet(iter(items))
+        self.assertEqual([10, 9, 8, 7], list(s))
 
-    def test_valid_periodic(self):
+    def test_length(self):
+        items = [10, 9, 8, 7]
+        s = sets.OrderedSet(iter(items))
+        self.assertEqual(4, len(s))
 
-        @periodic.periodic(2)
-        def no_op():
-            pass
+    def test_duplicate_length(self):
+        items = [10, 9, 10, 8, 9, 7, 8]
+        s = sets.OrderedSet(iter(items))
+        self.assertEqual(4, len(s))
 
-        self.assertTrue(getattr(no_op, '_periodic'))
-        self.assertEqual(2, getattr(no_op, '_periodic_spacing'))
-        self.assertEqual(True, getattr(no_op, '_periodic_run_immediately'))
+    def test_contains(self):
+        items = [10, 9, 8, 7]
+        s = sets.OrderedSet(iter(items))
+        for i in items:
+            self.assertIn(i, s)
 
-    def test_scanning_periodic(self):
-        p = PeriodicThingy()
-        w = periodic.PeriodicWorker.create([p])
-        self.assertEqual(2, len(w))
+    def test_copy(self):
+        items = [10, 9, 8, 7]
+        s = sets.OrderedSet(iter(items))
+        s2 = s.copy()
+        self.assertEqual(s, s2)
+        self.assertEqual(items, list(s2))
 
-        t = tu.daemon_thread(target=w.start)
-        t.start()
-        time.sleep(0.1)
-        w.stop()
-        t.join()
+    def test_empty_intersection(self):
+        s = sets.OrderedSet([1, 2, 3])
 
-        b_calls = [c for c in p.capture if c == 'b']
-        self.assertGreater(0, len(b_calls))
-        a_calls = [c for c in p.capture if c == 'a']
-        self.assertGreater(0, len(a_calls))
+        es = set(s)
 
-    def test_periodic_single(self):
-        barrier = latch.Latch(5)
-        capture = []
-        tombstone = tu.Event()
+        self.assertEqual(es.intersection(), s.intersection())
 
-        @periodic.periodic(0.01)
-        def callee():
-            barrier.countdown()
-            if barrier.needed == 0:
-                tombstone.set()
-            capture.append(1)
+    def test_intersection(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3, 4, 5])
 
-        w = periodic.PeriodicWorker([callee], tombstone=tombstone)
-        t = tu.daemon_thread(target=w.start)
-        t.start()
-        t.join()
+        es = set(s)
+        es2 = set(s2)
 
-        self.assertEqual(0, barrier.needed)
-        self.assertEqual(5, sum(capture))
-        self.assertTrue(tombstone.is_set())
+        self.assertEqual(es.intersection(es2), s.intersection(s2))
+        self.assertEqual(es2.intersection(s), s2.intersection(s))
 
-    def test_immediate(self):
-        capture = []
+    def test_multi_intersection(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3, 4, 5])
+        s3 = sets.OrderedSet([1, 2])
 
-        @periodic.periodic(120, run_immediately=True)
-        def a():
-            capture.append('a')
+        es = set(s)
+        es2 = set(s2)
+        es3 = set(s3)
 
-        w = periodic.PeriodicWorker([a])
-        t = tu.daemon_thread(target=w.start)
-        t.start()
-        time.sleep(0.1)
-        w.stop()
-        t.join()
+        self.assertEqual(es.intersection(s2, s3), s.intersection(s2, s3))
+        self.assertEqual(es2.intersection(es3), s2.intersection(s3))
 
-        a_calls = [c for c in capture if c == 'a']
-        self.assertGreater(0, len(a_calls))
+    def test_superset(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3])
+        self.assertTrue(s.issuperset(s2))
+        self.assertFalse(s.issubset(s2))
 
-    def test_period_double_no_immediate(self):
-        capture = []
+    def test_subset(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3])
+        self.assertTrue(s2.issubset(s))
+        self.assertFalse(s2.issuperset(s))
 
-        @periodic.periodic(0.01, run_immediately=False)
-        def a():
-            capture.append('a')
+    def test_empty_difference(self):
+        s = sets.OrderedSet([1, 2, 3])
 
-        @periodic.periodic(0.02, run_immediately=False)
-        def b():
-            capture.append('b')
+        es = set(s)
 
-        w = periodic.PeriodicWorker([a, b])
-        t = tu.daemon_thread(target=w.start)
-        t.start()
-        time.sleep(0.1)
-        w.stop()
-        t.join()
+        self.assertEqual(es.difference(), s.difference())
 
-        b_calls = [c for c in capture if c == 'b']
-        self.assertGreater(0, len(b_calls))
-        a_calls = [c for c in capture if c == 'a']
-        self.assertGreater(0, len(a_calls))
+    def test_difference(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3])
 
-    def test_start_nothing_error(self):
-        w = periodic.PeriodicWorker([])
-        self.assertRaises(RuntimeError, w.start)
+        es = set(s)
+        es2 = set(s2)
 
-    def test_missing_function_attrs(self):
+        self.assertEqual(es.difference(es2), s.difference(s2))
+        self.assertEqual(es2.difference(es), s2.difference(s))
 
-        def fake_periodic():
-            pass
+    def test_multi_difference(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3])
+        s3 = sets.OrderedSet([3, 4, 5])
 
-        cb = fake_periodic
-        self.assertRaises(ValueError, periodic.PeriodicWorker, [cb])
+        es = set(s)
+        es2 = set(s2)
+        es3 = set(s3)
+
+        self.assertEqual(es3.difference(es), s3.difference(s))
+        self.assertEqual(es.difference(es3), s.difference(s3))
+        self.assertEqual(es2.difference(es, es3), s2.difference(s, s3))
+
+    def test_empty_union(self):
+        s = sets.OrderedSet([1, 2, 3])
+
+        es = set(s)
+
+        self.assertEqual(es.union(), s.union())
+
+    def test_union(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3, 4])
+
+        es = set(s)
+        es2 = set(s2)
+
+        self.assertEqual(es.union(es2), s.union(s2))
+        self.assertEqual(es2.union(es), s2.union(s))
+
+    def test_multi_union(self):
+        s = sets.OrderedSet([1, 2, 3])
+        s2 = sets.OrderedSet([2, 3, 4])
+        s3 = sets.OrderedSet([4, 5, 6])
+
+        es = set(s)
+        es2 = set(s2)
+        es3 = set(s3)
+
+        self.assertEqual(es.union(es2, es3), s.union(s2, s3))

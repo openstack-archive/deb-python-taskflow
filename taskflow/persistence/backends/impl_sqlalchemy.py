@@ -15,8 +15,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Implementation of a SQLAlchemy storage backend."""
-
 from __future__ import absolute_import
 
 import contextlib
@@ -36,7 +34,7 @@ from taskflow import logging
 from taskflow.persistence.backends.sqlalchemy import migration
 from taskflow.persistence.backends.sqlalchemy import tables
 from taskflow.persistence import base
-from taskflow.persistence import logbook
+from taskflow.persistence import models
 from taskflow.types import failure
 from taskflow.utils import eventlet_utils
 from taskflow.utils import misc
@@ -110,6 +108,12 @@ DEFAULT_TXN_ISOLATION_LEVELS = {
 }
 
 
+def _log_statements(log_level, conn, cursor, statement, parameters, *args):
+    if LOG.isEnabledFor(log_level):
+        LOG.log(log_level, "Running statement '%s' with parameters %s",
+                statement, parameters)
+
+
 def _in_any(reason, err_haystack):
     """Checks if any elements of the haystack are in the given reason."""
     for err in err_haystack:
@@ -180,7 +184,7 @@ def _ping_listener(dbapi_conn, connection_rec, connection_proxy):
             raise
 
 
-class Alchemist(object):
+class _Alchemist(object):
     """Internal <-> external row <-> objects + other helper functions.
 
     NOTE(harlowja): for internal usage only.
@@ -190,37 +194,37 @@ class Alchemist(object):
 
     @staticmethod
     def convert_flow_detail(row):
-        return logbook.FlowDetail.from_dict(dict(row.items()))
+        return models.FlowDetail.from_dict(dict(row.items()))
 
     @staticmethod
     def convert_book(row):
-        return logbook.LogBook.from_dict(dict(row.items()))
+        return models.LogBook.from_dict(dict(row.items()))
 
     @staticmethod
     def convert_atom_detail(row):
         row = dict(row.items())
-        atom_cls = logbook.atom_detail_class(row.pop('atom_type'))
+        atom_cls = models.atom_detail_class(row.pop('atom_type'))
         return atom_cls.from_dict(row)
 
-    def _atom_query_iter(self, conn, parent_uuid):
+    def atom_query_iter(self, conn, parent_uuid):
         q = (sql.select([self._tables.atomdetails]).
              where(self._tables.atomdetails.c.parent_uuid == parent_uuid))
         for row in conn.execute(q):
             yield self.convert_atom_detail(row)
 
-    def _flow_query_iter(self, conn, parent_uuid):
+    def flow_query_iter(self, conn, parent_uuid):
         q = (sql.select([self._tables.flowdetails]).
              where(self._tables.flowdetails.c.parent_uuid == parent_uuid))
         for row in conn.execute(q):
             yield self.convert_flow_detail(row)
 
     def populate_book(self, conn, book):
-        for fd in self._flow_query_iter(conn, book.uuid):
+        for fd in self.flow_query_iter(conn, book.uuid):
             book.add(fd)
             self.populate_flow_detail(conn, fd)
 
     def populate_flow_detail(self, conn, fd):
-        for ad in self._atom_query_iter(conn, fd.uuid):
+        for ad in self.atom_query_iter(conn, fd.uuid):
             fd.add(ad)
 
 
@@ -292,6 +296,13 @@ class SQLAlchemyBackend(base.Backend):
         # or engine arg overrides make sure we merge them in.
         engine_args.update(conf.pop('engine_args', {}))
         engine = sa.create_engine(sql_connection, **engine_args)
+        log_statements = conf.pop('log_statements', False)
+        if _as_bool(log_statements):
+            log_statements_level = conf.pop("log_statements_level",
+                                            logging.BLATHER)
+            sa.event.listen(engine, "before_cursor_execute",
+                            functools.partial(_log_statements,
+                                              log_statements_level))
         checkin_yield = conf.pop('checkin_yield',
                                  eventlet_utils.EVENTLET_AVAILABLE)
         if _as_bool(checkin_yield):
@@ -343,7 +354,7 @@ class Connection(base.Connection):
         self._engine = backend.engine
         self._metadata = sa.MetaData()
         self._tables = tables.fetch(self._metadata)
-        self._converter = Alchemist(self._tables)
+        self._converter = _Alchemist(self._tables)
 
     @property
     def backend(self):
@@ -405,16 +416,18 @@ class Connection(base.Connection):
                     self._metadata.create_all(bind=conn)
                 else:
                     migration.db_sync(conn)
-        except sa_exc.SQLAlchemyError as e:
-            raise exc.StorageFailure("Failed upgrading database version", e)
+        except sa_exc.SQLAlchemyError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed upgrading database version")
 
     def clear_all(self):
         try:
             logbooks = self._tables.logbooks
             with self._engine.begin() as conn:
                 conn.execute(logbooks.delete())
-        except sa_exc.DBAPIError as e:
-            raise exc.StorageFailure("Failed clearing all entries", e)
+        except sa_exc.DBAPIError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed clearing all entries")
 
     def update_atom_details(self, atom_detail):
         try:
@@ -429,9 +442,10 @@ class Connection(base.Connection):
                 e_ad = self._converter.convert_atom_detail(row)
                 self._update_atom_details(conn, atom_detail, e_ad)
             return e_ad
-        except sa_exc.SQLAlchemyError as e:
-            raise exc.StorageFailure("Failed updating atom details with"
-                                     " uuid '%s'" % atom_detail.uuid, e)
+        except sa_exc.SQLAlchemyError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed updating atom details"
+                                 " with uuid '%s'" % atom_detail.uuid)
 
     def _insert_flow_details(self, conn, fd, parent_uuid):
         value = fd.to_dict()
@@ -443,7 +457,7 @@ class Connection(base.Connection):
     def _insert_atom_details(self, conn, ad, parent_uuid):
         value = ad.to_dict()
         value['parent_uuid'] = parent_uuid
-        value['atom_type'] = logbook.atom_detail_type(ad)
+        value['atom_type'] = models.atom_detail_type(ad)
         conn.execute(sql.insert(self._tables.atomdetails, value))
 
     def _update_atom_details(self, conn, ad, e_ad):
@@ -479,9 +493,10 @@ class Connection(base.Connection):
                 self._converter.populate_flow_detail(conn, e_fd)
                 self._update_flow_details(conn, flow_detail, e_fd)
             return e_fd
-        except sa_exc.SQLAlchemyError as e:
-            raise exc.StorageFailure("Failed updating flow details with"
-                                     " uuid '%s'" % flow_detail.uuid, e)
+        except sa_exc.SQLAlchemyError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed updating flow details with"
+                                 " uuid '%s'" % flow_detail.uuid)
 
     def destroy_logbook(self, book_uuid):
         try:
@@ -492,9 +507,9 @@ class Connection(base.Connection):
                 if r.rowcount == 0:
                     raise exc.NotFound("No logbook found with"
                                        " uuid '%s'" % book_uuid)
-        except sa_exc.DBAPIError as e:
-            raise exc.StorageFailure("Failed destroying"
-                                     " logbook '%s'" % book_uuid, e)
+        except sa_exc.DBAPIError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed destroying logbook '%s'" % book_uuid)
 
     def save_logbook(self, book):
         try:
@@ -523,11 +538,12 @@ class Connection(base.Connection):
                     for fd in book:
                         self._insert_flow_details(conn, fd, book.uuid)
                     return book
-        except sa_exc.DBAPIError as e:
-            raise exc.StorageFailure("Failed saving logbook"
-                                     " '%s'" % book.uuid, e)
+        except sa_exc.DBAPIError:
+            exc.raise_with_cause(
+                exc.StorageFailure,
+                "Failed saving logbook '%s'" % book.uuid)
 
-    def get_logbook(self, book_uuid):
+    def get_logbook(self, book_uuid, lazy=False):
         try:
             logbooks = self._tables.logbooks
             with contextlib.closing(self._engine.connect()) as conn:
@@ -538,25 +554,91 @@ class Connection(base.Connection):
                     raise exc.NotFound("No logbook found with"
                                        " uuid '%s'" % book_uuid)
                 book = self._converter.convert_book(row)
-                self._converter.populate_book(conn, book)
+                if not lazy:
+                    self._converter.populate_book(conn, book)
                 return book
-        except sa_exc.DBAPIError as e:
-            raise exc.StorageFailure(
-                "Failed getting logbook '%s'" % book_uuid, e)
+        except sa_exc.DBAPIError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed getting logbook '%s'" % book_uuid)
 
-    def get_logbooks(self):
+    def get_logbooks(self, lazy=False):
         gathered = []
         try:
             with contextlib.closing(self._engine.connect()) as conn:
                 q = sql.select([self._tables.logbooks])
                 for row in conn.execute(q):
                     book = self._converter.convert_book(row)
-                    self._converter.populate_book(conn, book)
+                    if not lazy:
+                        self._converter.populate_book(conn, book)
                     gathered.append(book)
-        except sa_exc.DBAPIError as e:
-            raise exc.StorageFailure("Failed getting logbooks", e)
+        except sa_exc.DBAPIError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed getting logbooks")
         for book in gathered:
             yield book
+
+    def get_flows_for_book(self, book_uuid, lazy=False):
+        gathered = []
+        try:
+            with contextlib.closing(self._engine.connect()) as conn:
+                for fd in self._converter.flow_query_iter(conn, book_uuid):
+                    if not lazy:
+                        self._converter.populate_flow_detail(conn, fd)
+                    gathered.append(fd)
+        except sa_exc.DBAPIError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed getting flow details in"
+                                 " logbook '%s'" % book_uuid)
+        for flow_details in gathered:
+            yield flow_details
+
+    def get_flow_details(self, fd_uuid, lazy=False):
+        try:
+            flowdetails = self._tables.flowdetails
+            with self._engine.begin() as conn:
+                q = (sql.select([flowdetails]).
+                     where(flowdetails.c.uuid == fd_uuid))
+                row = conn.execute(q).first()
+                if not row:
+                    raise exc.NotFound("No flow details found with uuid"
+                                       " '%s'" % fd_uuid)
+                fd = self._converter.convert_flow_detail(row)
+                if not lazy:
+                    self._converter.populate_flow_detail(conn, fd)
+                return fd
+        except sa_exc.SQLAlchemyError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed getting flow details with"
+                                 " uuid '%s'" % fd_uuid)
+
+    def get_atom_details(self, ad_uuid):
+        try:
+            atomdetails = self._tables.atomdetails
+            with self._engine.begin() as conn:
+                q = (sql.select([atomdetails]).
+                     where(atomdetails.c.uuid == ad_uuid))
+                row = conn.execute(q).first()
+                if not row:
+                    raise exc.NotFound("No atom details found with uuid"
+                                       " '%s'" % ad_uuid)
+                return self._converter.convert_atom_detail(row)
+        except sa_exc.SQLAlchemyError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed getting atom details with"
+                                 " uuid '%s'" % ad_uuid)
+
+    def get_atoms_for_flow(self, fd_uuid):
+        gathered = []
+        try:
+            with contextlib.closing(self._engine.connect()) as conn:
+                for ad in self._converter.atom_query_iter(conn, fd_uuid):
+                    gathered.append(ad)
+        except sa_exc.DBAPIError:
+            exc.raise_with_cause(exc.StorageFailure,
+                                 "Failed getting atom details in flow"
+                                 " detail '%s'" % fd_uuid)
+        for atom_details in gathered:
+            yield atom_details
 
     def close(self):
         pass

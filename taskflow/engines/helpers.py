@@ -18,6 +18,7 @@ import contextlib
 import itertools
 import traceback
 
+from debtcollector import renames
 from oslo_utils import importutils
 from oslo_utils import reflection
 import six
@@ -26,7 +27,6 @@ import stevedore.driver
 from taskflow import exceptions as exc
 from taskflow import logging
 from taskflow.persistence import backends as p_backends
-from taskflow.utils import deprecation
 from taskflow.utils import misc
 from taskflow.utils import persistence_utils as p_utils
 
@@ -90,14 +90,14 @@ def _extract_engine(**kwargs):
             lambda frame: frame[0] in _FILE_NAMES,
             reversed(traceback.extract_stack(limit=3)))
         stacklevel = sum(1 for _frame in finder)
-        decorator = deprecation.renamed_kwarg('engine_conf', 'engine',
-                                              version="0.6",
-                                              removal_version="?",
-                                              # Three is added on since the
-                                              # decorator adds three of its own
-                                              # stack levels that we need to
-                                              # hop out of...
-                                              stacklevel=stacklevel + 3)
+        decorator = renames.renamed_kwarg('engine_conf', 'engine',
+                                          version="0.6",
+                                          removal_version="2.0",
+                                          # Three is added on since the
+                                          # decorator adds three of its own
+                                          # stack levels that we need to
+                                          # hop out of...
+                                          stacklevel=stacklevel + 3)
         return decorator(_compat_extract)(**kwargs)
     else:
         return _compat_extract(**kwargs)
@@ -134,7 +134,7 @@ def load(flow, store=None, flow_detail=None, book=None,
 
     This function creates and prepares an engine to run the provided flow. All
     that is left after this returns is to run the engine with the
-    engines ``run()`` method.
+    engines :py:meth:`~taskflow.engines.base.Engine.run` method.
 
     Which engine to load is specified via the ``engine`` parameter. It
     can be a string that names the engine type to use, or a string that
@@ -143,7 +143,15 @@ def load(flow, store=None, flow_detail=None, book=None,
 
     Which storage backend to use is defined by the backend parameter. It
     can be backend itself, or a dictionary that is passed to
-    ``taskflow.persistence.backends.fetch()`` to obtain a viable backend.
+    :py:func:`~taskflow.persistence.backends.fetch` to obtain a
+    viable backend.
+
+    .. deprecated:: 0.6
+
+        The ``engine_conf`` argument is **deprecated** and is present
+        for backward compatibility **only**. In order to provide this
+        argument going forward the ``engine`` string (or URI) argument
+        should be used instead.
 
     :param flow: flow to load
     :param store: dict -- data to put to storage to satisfy flow requirements
@@ -198,7 +206,15 @@ def run(flow, store=None, flow_detail=None, book=None,
 
     The arguments are interpreted as for :func:`load() <load>`.
 
-    :returns: dictionary of all named results (see ``storage.fetch_all()``)
+    .. deprecated:: 0.6
+
+        The ``engine_conf`` argument is **deprecated** and is present
+        for backward compatibility **only**. In order to provide this
+        argument going forward the ``engine`` string (or URI) argument
+        should be used instead.
+
+    :returns: dictionary of all named
+              results (see :py:meth:`~.taskflow.storage.Storage.fetch_all`)
     """
     engine = load(flow, store=store, flow_detail=flow_detail, book=book,
                   engine_conf=engine_conf, backend=backend,
@@ -262,6 +278,13 @@ def load_from_factory(flow_factory, factory_args=None, factory_kwargs=None,
 
     Further arguments are interpreted as for :func:`load() <load>`.
 
+    .. deprecated:: 0.6
+
+        The ``engine_conf`` argument is **deprecated** and is present
+        for backward compatibility **only**. In order to provide this
+        argument going forward the ``engine`` string (or URI) argument
+        should be used instead.
+
     :returns: engine
     """
 
@@ -321,6 +344,13 @@ def load_from_detail(flow_detail, store=None, engine_conf=None, backend=None,
     :param flow_detail: FlowDetail that holds state of the flow to load
 
     Further arguments are interpreted as for :func:`load() <load>`.
+
+    .. deprecated:: 0.6
+
+        The ``engine_conf`` argument is **deprecated** and is present
+        for backward compatibility **only**. In order to provide this
+        argument going forward the ``engine`` string (or URI) argument
+        should be used instead.
 
     :returns: engine
     """

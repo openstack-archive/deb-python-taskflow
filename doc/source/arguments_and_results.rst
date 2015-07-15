@@ -74,8 +74,8 @@ ignored during inference (as these names have special meaning/usage in python).
     ...     def execute(self, *args, **kwargs):
     ...         pass
     ...
-    >>> UniTask().requires
-    frozenset([])
+    >>> sorted(UniTask().requires)
+    []
 
 .. make vim sphinx highlighter* happy**
 
@@ -84,7 +84,7 @@ Rebinding
 ---------
 
 **Why:** There are cases when the value you want to pass to a task/retry is
-stored with a name other then the corresponding arguments name. That's when the
+stored with a name other than the corresponding arguments name. That's when the
 ``rebind`` constructor parameter comes in handy. Using it the flow author
 can instruct the engine to fetch a value from storage by one name, but pass it
 to a tasks/retrys ``execute`` method with another name. There are two possible
@@ -214,8 +214,8 @@ name of the value.
     ...    def execute(self):
     ...        return 42
     ...
-    >>> TheAnswerReturningTask(provides='the_answer').provides
-    set(['the_answer'])
+    >>> sorted(TheAnswerReturningTask(provides='the_answer').provides)
+    ['the_answer']
 
 Returning a tuple
 +++++++++++++++++
@@ -416,7 +416,7 @@ the following history (printed as a list)::
 At this point (since the implementation returned ``RETRY``) the
 |retry.execute| method will be called again and it will receive the same
 history and it can then return a value that subseqent tasks can use to alter
-there behavior.
+their behavior.
 
 If instead the |retry.execute| method itself raises an exception,
 the |retry.revert| method of the implementation will be called and

@@ -31,6 +31,7 @@ top_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),
 sys.path.insert(0, top_dir)
 sys.path.insert(0, self_dir)
 
+import futurist
 from oslo_utils import uuidutils
 
 from taskflow import engines
@@ -38,13 +39,12 @@ from taskflow import exceptions as exc
 from taskflow.patterns import graph_flow as gf
 from taskflow.patterns import linear_flow as lf
 from taskflow import task
-from taskflow.types import futures
 from taskflow.utils import eventlet_utils
 from taskflow.utils import persistence_utils as p_utils
 
 import example_utils as eu  # noqa
 
-# INTRO: This examples shows how a hierarchy of flows can be used to create a
+# INTRO: These examples show how a hierarchy of flows can be used to create a
 # vm in a reliable & resumable manner using taskflow + a miniature version of
 # what nova does while booting a vm.
 
@@ -239,7 +239,7 @@ with eu.get_backend() as backend:
     # Set up how we want our engine to run, serial, parallel...
     executor = None
     if eventlet_utils.EVENTLET_AVAILABLE:
-        executor = futures.GreenThreadPoolExecutor(5)
+        executor = futurist.GreenThreadPoolExecutor(5)
 
     # Create/fetch a logbook that will track the workflows work.
     book = None

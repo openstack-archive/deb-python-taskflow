@@ -19,7 +19,10 @@ import contextlib
 import threading
 
 from concurrent import futures
+import fasteners
+import networkx as nx
 from oslo_utils import excutils
+from oslo_utils import strutils
 import six
 
 from taskflow.engines.action_engine import compiler
@@ -27,10 +30,13 @@ from taskflow.engines.action_engine import executor
 from taskflow.engines.action_engine import runtime
 from taskflow.engines import base
 from taskflow import exceptions as exc
+from taskflow import logging
 from taskflow import states
+from taskflow import storage
 from taskflow.types import failure
-from taskflow.utils import lock_utils
 from taskflow.utils import misc
+
+LOG = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -60,6 +66,13 @@ class ActionEngine(base.Engine):
     """
     _compiler_factory = compiler.PatternCompiler
 
+    NO_RERAISING_STATES = frozenset([states.SUSPENDED, states.SUCCESS])
+    """
+    States that if the engine stops in will **not** cause any potential
+    failures to be reraised. States **not** in this list will cause any
+    failure/s that were captured (if any) to get reraised.
+    """
+
     def __init__(self, flow, flow_detail, backend, options):
         super(ActionEngine, self).__init__(flow, flow_detail, backend, options)
         self._runtime = None
@@ -69,10 +82,18 @@ class ActionEngine(base.Engine):
         self._state_lock = threading.RLock()
         self._storage_ensured = False
 
+    def _check(self, name, check_compiled, check_storage_ensured):
+        """Check (and raise) if the engine has not reached a certain stage."""
+        if check_compiled and not self._compiled:
+            raise exc.InvalidState("Can not %s an engine which"
+                                   " has not been compiled" % name)
+        if check_storage_ensured and not self._storage_ensured:
+            raise exc.InvalidState("Can not %s an engine"
+                                   " which has not has its storage"
+                                   " populated" % name)
+
     def suspend(self):
-        if not self._compiled:
-            raise exc.InvalidState("Can not suspend an engine"
-                                   " which has not been compiled")
+        self._check('suspend', True, False)
         self._change_state(states.SUSPENDING)
 
     @property
@@ -88,8 +109,31 @@ class ActionEngine(base.Engine):
         else:
             return None
 
+    @misc.cachedproperty
+    def storage(self):
+        """The storage unit for this engine.
+
+        NOTE(harlowja): the atom argument lookup strategy will change for
+        this storage unit after
+        :py:func:`~taskflow.engines.base.Engine.compile` has
+        completed (since **only** after compilation is the actual structure
+        known). Before :py:func:`~taskflow.engines.base.Engine.compile`
+        has completed the atom argument lookup strategy lookup will be
+        restricted to injected arguments **only** (this will **not** reflect
+        the actual runtime lookup strategy, which typically will be, but is
+        not always different).
+        """
+        def _scope_fetcher(atom_name):
+            if self._compiled:
+                return self._runtime.fetch_scopes_for(atom_name)
+            else:
+                return None
+        return storage.Storage(self._flow_detail,
+                               backend=self._backend,
+                               scope_fetcher=_scope_fetcher)
+
     def run(self):
-        with lock_utils.try_lock(self._lock) as was_locked:
+        with fasteners.try_lock(self._lock) as was_locked:
             if not was_locked:
                 raise exc.ExecutionFailure("Engine currently locked, please"
                                            " try again later")
@@ -119,6 +163,7 @@ class ActionEngine(base.Engine):
         """
         self.compile()
         self.prepare()
+        self.validate()
         runner = self._runtime.runner
         last_state = None
         with _start_stop(self._task_executor):
@@ -148,7 +193,7 @@ class ActionEngine(base.Engine):
                 ignorable_states = getattr(runner, 'ignorable_states', [])
                 if last_state and last_state not in ignorable_states:
                     self._change_state(last_state)
-                    if last_state not in [states.SUSPENDED, states.SUCCESS]:
+                    if last_state not in self.NO_RERAISING_STATES:
                         failures = self.storage.get_failures()
                         failure.Failure.reraise_if_any(failures.values())
 
@@ -168,16 +213,63 @@ class ActionEngine(base.Engine):
 
     def _ensure_storage(self):
         """Ensure all contained atoms exist in the storage unit."""
+        transient = strutils.bool_from_string(
+            self._options.get('inject_transient', True))
+        self.storage.ensure_atoms(
+            self._compilation.execution_graph.nodes_iter())
         for node in self._compilation.execution_graph.nodes_iter():
-            self.storage.ensure_atom(node)
             if node.inject:
-                self.storage.inject_atom_args(node.name, node.inject)
+                self.storage.inject_atom_args(node.name,
+                                              node.inject,
+                                              transient=transient)
 
-    @lock_utils.locked
+    @fasteners.locked
+    def validate(self):
+        self._check('validate', True, True)
+        # At this point we can check to ensure all dependencies are either
+        # flow/task provided or storage provided, if there are still missing
+        # dependencies then this flow will fail at runtime (which we can avoid
+        # by failing at validation time).
+        execution_graph = self._compilation.execution_graph
+        if LOG.isEnabledFor(logging.BLATHER):
+            LOG.blather("Validating scoping and argument visibility for"
+                        " execution graph with %s nodes and %s edges with"
+                        " density %0.3f", execution_graph.number_of_nodes(),
+                        execution_graph.number_of_edges(),
+                        nx.density(execution_graph))
+        missing = set()
+        # Attempt to retain a chain of what was missing (so that the final
+        # raised exception for the flow has the nodes that had missing
+        # dependencies).
+        last_cause = None
+        last_node = None
+        missing_nodes = 0
+        fetch_func = self.storage.fetch_unsatisfied_args
+        for node in execution_graph.nodes_iter():
+            node_missing = fetch_func(node.name, node.rebind,
+                                      optional_args=node.optional)
+            if node_missing:
+                cause = exc.MissingDependencies(node,
+                                                sorted(node_missing),
+                                                cause=last_cause)
+                last_cause = cause
+                last_node = node
+                missing_nodes += 1
+                missing.update(node_missing)
+        if missing:
+            # For when a task is provided (instead of a flow) and that
+            # task is the only item in the graph and its missing deps, avoid
+            # re-wrapping it in yet another exception...
+            if missing_nodes == 1 and last_node is self._flow:
+                raise last_cause
+            else:
+                raise exc.MissingDependencies(self._flow,
+                                              sorted(missing),
+                                              cause=last_cause)
+
+    @fasteners.locked
     def prepare(self):
-        if not self._compiled:
-            raise exc.InvalidState("Can not prepare an engine"
-                                   " which has not been compiled")
+        self._check('prepare', True, False)
         if not self._storage_ensured:
             # Set our own state to resuming -> (ensure atoms exist
             # in storage) -> suspended in the storage unit and notify any
@@ -186,14 +278,6 @@ class ActionEngine(base.Engine):
             self._ensure_storage()
             self._change_state(states.SUSPENDED)
             self._storage_ensured = True
-        # At this point we can check to ensure all dependencies are either
-        # flow/task provided or storage provided, if there are still missing
-        # dependencies then this flow will fail at runtime (which we can avoid
-        # by failing at preparation time).
-        external_provides = set(self.storage.fetch_all().keys())
-        missing = self._flow.requires - external_provides
-        if missing:
-            raise exc.MissingDependencies(self._flow, sorted(missing))
         # Reset everything back to pending (if we were previously reverted).
         if self.storage.get_flow_state() == states.REVERTED:
             self._runtime.reset_all()
@@ -203,7 +287,7 @@ class ActionEngine(base.Engine):
     def _compiler(self):
         return self._compiler_factory(self._flow)
 
-    @lock_utils.locked
+    @fasteners.locked
     def compile(self):
         if self._compiled:
             return
@@ -212,6 +296,7 @@ class ActionEngine(base.Engine):
                                         self.storage,
                                         self.atom_notifier,
                                         self._task_executor)
+        self._runtime.compile()
         self._compiled = True
 
 
@@ -239,7 +324,7 @@ class _ExecutorTextMatch(collections.namedtuple('_ExecutorTextMatch',
 class ParallelActionEngine(ActionEngine):
     """Engine that runs tasks in parallel manner.
 
-    Supported keyword arguments:
+    Supported option keys:
 
     * ``executor``: a object that implements a :pep:`3148` compatible executor
       interface; it will be used for scheduling tasks. The following
@@ -279,7 +364,7 @@ String (case insensitive)    Executor used
     #
     # NOTE(harlowja): the reason we use the library/built-in futures is to
     # allow for instances of that to be detected and handled correctly, instead
-    # of forcing everyone to use our derivatives...
+    # of forcing everyone to use our derivatives (futurist or other)...
     _executor_cls_matchers = [
         _ExecutorTypeMatch((futures.ThreadPoolExecutor,),
                            executor.ParallelThreadTaskExecutor),

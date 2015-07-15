@@ -40,38 +40,38 @@ On :doc:`engine <engines>` construction typically a backend (it can be
 optional) will be provided which satisfies the
 :py:class:`~taskflow.persistence.base.Backend` abstraction. Along with
 providing a backend object a
-:py:class:`~taskflow.persistence.logbook.FlowDetail` object will also be
+:py:class:`~taskflow.persistence.models.FlowDetail` object will also be
 created and provided (this object will contain the details about the flow to be
 ran) to the engine constructor (or associated :py:meth:`load()
 <taskflow.engines.helpers.load>` helper functions).  Typically a
-:py:class:`~taskflow.persistence.logbook.FlowDetail` object is created from a
-:py:class:`~taskflow.persistence.logbook.LogBook` object (the book object acts
-as a type of container for :py:class:`~taskflow.persistence.logbook.FlowDetail`
-and :py:class:`~taskflow.persistence.logbook.AtomDetail` objects).
+:py:class:`~taskflow.persistence.models.FlowDetail` object is created from a
+:py:class:`~taskflow.persistence.models.LogBook` object (the book object acts
+as a type of container for :py:class:`~taskflow.persistence.models.FlowDetail`
+and :py:class:`~taskflow.persistence.models.AtomDetail` objects).
 
 **Preparation**: Once an engine starts to run it will create a
 :py:class:`~taskflow.storage.Storage` object which will act as the engines
 interface to the underlying backend storage objects (it provides helper
 functions that are commonly used by the engine, avoiding repeating code when
 interacting with the provided
-:py:class:`~taskflow.persistence.logbook.FlowDetail` and
+:py:class:`~taskflow.persistence.models.FlowDetail` and
 :py:class:`~taskflow.persistence.base.Backend` objects). As an engine
 initializes it will extract (or create)
-:py:class:`~taskflow.persistence.logbook.AtomDetail` objects for each atom in
+:py:class:`~taskflow.persistence.models.AtomDetail` objects for each atom in
 the workflow the engine will be executing.
 
 **Execution:** When an engine beings to execute (see :doc:`engine <engines>`
 for more of the details about how an engine goes about this process) it will
 examine any previously existing
-:py:class:`~taskflow.persistence.logbook.AtomDetail` objects to see if they can
+:py:class:`~taskflow.persistence.models.AtomDetail` objects to see if they can
 be used for resuming; see :doc:`resumption <resumption>` for more details on
 this subject. For atoms which have not finished (or did not finish correctly
 from a previous run) they will begin executing only after any dependent inputs
 are ready. This is done by analyzing the execution graph and looking at
-predecessor :py:class:`~taskflow.persistence.logbook.AtomDetail` outputs and
+predecessor :py:class:`~taskflow.persistence.models.AtomDetail` outputs and
 states (which may have been persisted in a past run). This will result in
-either using there previous information or by running those predecessors and
-saving their output to the :py:class:`~taskflow.persistence.logbook.FlowDetail`
+either using their previous information or by running those predecessors and
+saving their output to the :py:class:`~taskflow.persistence.models.FlowDetail`
 and :py:class:`~taskflow.persistence.base.Backend` objects. This
 execution, analysis and interaction with the storage objects continues (what is
 described here is a simplification of what really happens; which is quite a bit
@@ -81,7 +81,7 @@ will have succeeded or failed in its attempt to run the workflow).
 **Post-execution:** Typically when an engine is done running the logbook would
 be discarded (to avoid creating a stockpile of useless data) and the backend
 storage would be told to delete any contents for a given execution. For certain
-use-cases though it may be advantageous to retain logbooks and there contents.
+use-cases though it may be advantageous to retain logbooks and their contents.
 
 A few scenarios come to mind:
 
@@ -176,7 +176,7 @@ concept everyone is familiar with).
     See :py:class:`~taskflow.persistence.backends.impl_dir.DirBackend`
     for implementation details.
 
-Sqlalchemy
+SQLAlchemy
 ----------
 
 **Connection**: ``'mysql'`` or ``'postgres'`` or ``'sqlite'``
@@ -249,9 +249,13 @@ parent_uuid  VARCHAR   False
     ``results`` will contain. This size limit will restrict how many prior
     failures a retry atom can contain. More information and a future fix
     will be posted to bug `1416088`_ (for the meantime try to ensure that
-    your retry units history does not grow beyond ~80 prior results).
+    your retry units history does not grow beyond ~80 prior results). This
+    truncation can also be avoided by providing ``mysql_sql_mode`` as
+    ``traditional`` when selecting your mysql + sqlalchemy based
+    backend (see the `mysql modes`_ documentation for what this implies).
 
 .. _1416088: http://bugs.launchpad.net/taskflow/+bug/1416088
+.. _mysql modes: http://dev.mysql.com/doc/refman/5.0/en/sql-mode.html
 
 Zookeeper
 ---------
@@ -279,14 +283,34 @@ Interfaces
 
 .. automodule:: taskflow.persistence.backends
 .. automodule:: taskflow.persistence.base
-.. automodule:: taskflow.persistence.logbook
+.. automodule:: taskflow.persistence.path_based
+
+Models
+======
+
+.. automodule:: taskflow.persistence.models
 
 Implementations
 ===============
 
-.. automodule:: taskflow.persistence.backends.impl_dir
+Memory
+------
+
 .. automodule:: taskflow.persistence.backends.impl_memory
+
+Files
+-----
+
+.. automodule:: taskflow.persistence.backends.impl_dir
+
+SQLAlchemy
+----------
+
 .. automodule:: taskflow.persistence.backends.impl_sqlalchemy
+
+Zookeeper
+---------
+
 .. automodule:: taskflow.persistence.backends.impl_zookeeper
 
 Storage

@@ -14,6 +14,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import functools
+
 from taskflow.engines.action_engine.actions import retry as ra
 from taskflow.engines.action_engine.actions import task as ta
 from taskflow.engines.action_engine import analyzer as an
@@ -21,7 +23,9 @@ from taskflow.engines.action_engine import completer as co
 from taskflow.engines.action_engine import runner as ru
 from taskflow.engines.action_engine import scheduler as sched
 from taskflow.engines.action_engine import scopes as sc
+from taskflow import flow as flow_type
 from taskflow import states as st
+from taskflow import task
 from taskflow.utils import misc
 
 
@@ -38,7 +42,53 @@ class Runtime(object):
         self._task_executor = task_executor
         self._storage = storage
         self._compilation = compilation
-        self._scopes = {}
+        self._atom_cache = {}
+
+    def compile(self):
+        """Compiles & caches frequently used execution helper objects.
+
+        Build out a cache of commonly used item that are associated
+        with the contained atoms (by name), and are useful to have for
+        quick lookup on (for example, the change state handler function for
+        each atom, the scope walker object for each atom, the task or retry
+        specific scheduler and so-on).
+        """
+        change_state_handlers = {
+            'task': functools.partial(self.task_action.change_state,
+                                      progress=0.0),
+            'retry': self.retry_action.change_state,
+        }
+        schedulers = {
+            'retry': self.retry_scheduler,
+            'task': self.task_scheduler,
+        }
+        execution_graph = self._compilation.execution_graph
+        for atom in self.analyzer.iterate_all_nodes():
+            metadata = {}
+            walker = sc.ScopeWalker(self.compilation, atom, names_only=True)
+            if isinstance(atom, task.BaseTask):
+                check_transition_handler = st.check_task_transition
+                change_state_handler = change_state_handlers['task']
+                scheduler = schedulers['task']
+            else:
+                check_transition_handler = st.check_retry_transition
+                change_state_handler = change_state_handlers['retry']
+                scheduler = schedulers['retry']
+            edge_deciders = {}
+            for previous_atom in execution_graph.predecessors(atom):
+                # If there is any link function that says if this connection
+                # is able to run (or should not) ensure we retain it and use
+                # it later as needed.
+                u_v_data = execution_graph.adj[previous_atom][atom]
+                u_v_decider = u_v_data.get(flow_type.LINK_DECIDER)
+                if u_v_decider is not None:
+                    edge_deciders[previous_atom.name] = u_v_decider
+            metadata['scope_walker'] = walker
+            metadata['check_transition_handler'] = check_transition_handler
+            metadata['change_state_handler'] = change_state_handler
+            metadata['scheduler'] = scheduler
+            metadata['edge_deciders'] = edge_deciders
+            self._atom_cache[atom.name] = metadata
 
     @property
     def compilation(self):
@@ -50,7 +100,7 @@ class Runtime(object):
 
     @misc.cachedproperty
     def analyzer(self):
-        return an.Analyzer(self._compilation, self._storage)
+        return an.Analyzer(self)
 
     @misc.cachedproperty
     def runner(self):
@@ -65,52 +115,100 @@ class Runtime(object):
         return sched.Scheduler(self)
 
     @misc.cachedproperty
+    def task_scheduler(self):
+        return sched.TaskScheduler(self)
+
+    @misc.cachedproperty
+    def retry_scheduler(self):
+        return sched.RetryScheduler(self)
+
+    @misc.cachedproperty
     def retry_action(self):
-        return ra.RetryAction(self._storage, self._atom_notifier,
-                              self._fetch_scopes_for)
+        return ra.RetryAction(self._storage,
+                              self._atom_notifier)
 
     @misc.cachedproperty
     def task_action(self):
         return ta.TaskAction(self._storage,
-                             self._atom_notifier, self._fetch_scopes_for,
+                             self._atom_notifier,
                              self._task_executor)
 
-    def _fetch_scopes_for(self, atom):
-        """Fetches a tuple of the visible scopes for the given atom."""
+    def check_atom_transition(self, atom, current_state, target_state):
+        """Checks if the atom can transition to the provided target state."""
+        # This does not check if the name exists (since this is only used
+        # internally to the engine, and is not exposed to atoms that will
+        # not exist and therefore doesn't need to handle that case).
+        metadata = self._atom_cache[atom.name]
+        check_transition_handler = metadata['check_transition_handler']
+        return check_transition_handler(current_state, target_state)
+
+    def fetch_edge_deciders(self, atom):
+        """Fetches the edge deciders for the given atom."""
+        # This does not check if the name exists (since this is only used
+        # internally to the engine, and is not exposed to atoms that will
+        # not exist and therefore doesn't need to handle that case).
+        metadata = self._atom_cache[atom.name]
+        return metadata['edge_deciders']
+
+    def fetch_scheduler(self, atom):
+        """Fetches the cached specific scheduler for the given atom."""
+        # This does not check if the name exists (since this is only used
+        # internally to the engine, and is not exposed to atoms that will
+        # not exist and therefore doesn't need to handle that case).
+        metadata = self._atom_cache[atom.name]
+        return metadata['scheduler']
+
+    def fetch_scopes_for(self, atom_name):
+        """Fetches a walker of the visible scopes for the given atom."""
         try:
-            return self._scopes[atom]
+            metadata = self._atom_cache[atom_name]
         except KeyError:
-            walker = sc.ScopeWalker(self.compilation, atom,
-                                    names_only=True)
-            visible_to = tuple(walker)
-            self._scopes[atom] = visible_to
-            return visible_to
+            # This signals to the caller that there is no walker for whatever
+            # atom name was given that doesn't really have any associated atom
+            # known to be named with that name; this is done since the storage
+            # layer will call into this layer to fetch a scope for a named
+            # atom and users can provide random names that do not actually
+            # exist...
+            return None
+        else:
+            return metadata['scope_walker']
 
     # Various helper methods used by the runtime components; not for public
     # consumption...
 
-    def reset_nodes(self, nodes, state=st.PENDING, intention=st.EXECUTE):
-        for node in nodes:
+    def reset_nodes(self, atoms, state=st.PENDING, intention=st.EXECUTE):
+        """Resets all the provided atoms to the given state and intention."""
+        tweaked = []
+        for atom in atoms:
+            metadata = self._atom_cache[atom.name]
+            if state or intention:
+                tweaked.append((atom, state, intention))
             if state:
-                if self.task_action.handles(node):
-                    self.task_action.change_state(node, state,
-                                                  progress=0.0)
-                elif self.retry_action.handles(node):
-                    self.retry_action.change_state(node, state)
-                else:
-                    raise TypeError("Unknown how to reset atom '%s' (%s)"
-                                    % (node, type(node)))
+                change_state_handler = metadata['change_state_handler']
+                change_state_handler(atom, state)
             if intention:
-                self.storage.set_atom_intention(node.name, intention)
+                self.storage.set_atom_intention(atom.name, intention)
+        return tweaked
 
     def reset_all(self, state=st.PENDING, intention=st.EXECUTE):
-        self.reset_nodes(self.analyzer.iterate_all_nodes(),
-                         state=state, intention=intention)
+        """Resets all atoms to the given state and intention."""
+        return self.reset_nodes(self.analyzer.iterate_all_nodes(),
+                                state=state, intention=intention)
 
-    def reset_subgraph(self, node, state=st.PENDING, intention=st.EXECUTE):
-        self.reset_nodes(self.analyzer.iterate_subgraph(node),
-                         state=state, intention=intention)
+    def reset_subgraph(self, atom, state=st.PENDING, intention=st.EXECUTE):
+        """Resets a atoms subgraph to the given state and intention.
+
+        The subgraph is contained of all of the atoms successors.
+        """
+        return self.reset_nodes(self.analyzer.iterate_subgraph(atom),
+                                state=state, intention=intention)
 
     def retry_subflow(self, retry):
+        """Prepares a retrys + its subgraph for execution.
+
+        This sets the retrys intention to ``EXECUTE`` and resets all of its
+        subgraph (its successors) to the ``PENDING`` state with an ``EXECUTE``
+        intention.
+        """
         self.storage.set_atom_intention(retry.name, st.EXECUTE)
         self.reset_subgraph(retry)

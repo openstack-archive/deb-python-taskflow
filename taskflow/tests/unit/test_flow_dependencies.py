@@ -27,40 +27,40 @@ class FlowDependenciesTest(test.TestCase):
 
     def test_task_without_dependencies(self):
         flow = utils.TaskNoRequiresNoReturns()
-        self.assertEqual(flow.requires, set())
-        self.assertEqual(flow.provides, set())
+        self.assertEqual(set(), flow.requires)
+        self.assertEqual(set(), flow.provides)
 
     def test_task_requires_default_values(self):
         flow = utils.TaskMultiArg()
-        self.assertEqual(flow.requires, set(['x', 'y', 'z']))
-        self.assertEqual(flow.provides, set())
+        self.assertEqual(set(['x', 'y', 'z']), flow.requires)
+        self.assertEqual(set(), flow.provides, )
 
     def test_task_requires_rebinded_mapped(self):
         flow = utils.TaskMultiArg(rebind={'x': 'a', 'y': 'b', 'z': 'c'})
-        self.assertEqual(flow.requires, set(['a', 'b', 'c']))
-        self.assertEqual(flow.provides, set())
+        self.assertEqual(set(['a', 'b', 'c']), flow.requires)
+        self.assertEqual(set(), flow.provides)
 
     def test_task_requires_additional_values(self):
         flow = utils.TaskMultiArg(requires=['a', 'b'])
-        self.assertEqual(flow.requires, set(['a', 'b', 'x', 'y', 'z']))
-        self.assertEqual(flow.provides, set())
+        self.assertEqual(set(['a', 'b', 'x', 'y', 'z']), flow.requires)
+        self.assertEqual(set(), flow.provides)
 
     def test_task_provides_values(self):
         flow = utils.TaskMultiReturn(provides=['a', 'b', 'c'])
-        self.assertEqual(flow.requires, set())
-        self.assertEqual(flow.provides, set(['a', 'b', 'c']))
+        self.assertEqual(set(), flow.requires)
+        self.assertEqual(set(['a', 'b', 'c']), flow.provides)
 
     def test_task_provides_and_requires_values(self):
         flow = utils.TaskMultiArgMultiReturn(provides=['a', 'b', 'c'])
-        self.assertEqual(flow.requires, set(['x', 'y', 'z']))
-        self.assertEqual(flow.provides, set(['a', 'b', 'c']))
+        self.assertEqual(set(['x', 'y', 'z']), flow.requires)
+        self.assertEqual(set(['a', 'b', 'c']), flow.provides)
 
     def test_linear_flow_without_dependencies(self):
         flow = lf.Flow('lf').add(
             utils.TaskNoRequiresNoReturns('task1'),
             utils.TaskNoRequiresNoReturns('task2'))
-        self.assertEqual(flow.requires, set())
-        self.assertEqual(flow.provides, set())
+        self.assertEqual(set(), flow.requires)
+        self.assertEqual(set(), flow.provides)
 
     def test_linear_flow_requires_values(self):
         flow = lf.Flow('lf').add(
@@ -243,10 +243,10 @@ class FlowDependenciesTest(test.TestCase):
                                                           requires=['a']))
 
     def test_task_requires_and_provides_same_values(self):
-        self.assertRaises(exceptions.DependencyFailure,
-                          utils.TaskOneArgOneReturn,
-                          requires='a',
-                          provides='a')
+        flow = lf.Flow('lf', utils.TaskOneArgOneReturn('rt', requires='x',
+                                                       provides='x'))
+        self.assertEqual(flow.requires, set('x'))
+        self.assertEqual(flow.provides, set('x'))
 
     def test_retry_in_linear_flow_no_requirements_no_provides(self):
         flow = lf.Flow('lf', retry.AlwaysRevert('rt'))
@@ -271,9 +271,11 @@ class FlowDependenciesTest(test.TestCase):
         self.assertEqual(flow.provides, set(['a', 'b']))
 
     def test_retry_requires_and_provides_same_value(self):
-        self.assertRaises(exceptions.DependencyFailure,
-                          retry.AlwaysRevert,
-                          'rt', requires=['x', 'y'], provides=['x', 'y'])
+        flow = lf.Flow('lf', retry.AlwaysRevert('rt',
+                                                requires=['x', 'y'],
+                                                provides=['x', 'y']))
+        self.assertEqual(flow.requires, set(['x', 'y']))
+        self.assertEqual(flow.provides, set(['x', 'y']))
 
     def test_retry_in_unordered_flow_no_requirements_no_provides(self):
         flow = uf.Flow('uf', retry.AlwaysRevert('rt'))

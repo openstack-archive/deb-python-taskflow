@@ -17,14 +17,14 @@
 import functools
 
 from oslo_utils import reflection
-import six
+from oslo_utils import timeutils
 
+from taskflow.engines.worker_based import dispatcher
 from taskflow.engines.worker_based import protocol as pr
 from taskflow.engines.worker_based import proxy
 from taskflow import logging
 from taskflow.types import failure as ft
 from taskflow.types import notifier as nt
-from taskflow.types import timing as tt
 from taskflow.utils import kombu_utils as ku
 from taskflow.utils import misc
 
@@ -38,14 +38,13 @@ class Server(object):
                  url=None, transport=None, transport_options=None,
                  retry_options=None):
         type_handlers = {
-            pr.NOTIFY: [
+            pr.NOTIFY: dispatcher.Handler(
                 self._delayed_process(self._process_notify),
-                functools.partial(pr.Notify.validate, response=False),
-            ],
-            pr.REQUEST: [
+                validator=functools.partial(pr.Notify.validate,
+                                            response=False)),
+            pr.REQUEST: dispatcher.Handler(
                 self._delayed_process(self._process_request),
-                pr.Request.validate,
-            ],
+                validator=pr.Request.validate),
         }
         self._executor = executor
         self._proxy = proxy.Proxy(topic, exchange,
@@ -77,7 +76,7 @@ class Server(object):
         def _on_receive(content, message):
             LOG.debug("Submitting message '%s' for execution in the"
                       " future to '%s'", ku.DelayedPretty(message), func_name)
-            watch = tt.StopWatch()
+            watch = timeutils.StopWatch()
             watch.start()
             try:
                 self._executor.submit(_on_run, watch, content, message)
@@ -93,32 +92,6 @@ class Server(object):
     @property
     def connection_details(self):
         return self._proxy.connection_details
-
-    @staticmethod
-    def _parse_request(task_cls, task_name, action, arguments, result=None,
-                       failures=None, **kwargs):
-        """Parse request before it can be further processed.
-
-        All `failure.Failure` objects that have been converted to dict on the
-        remote side will now converted back to `failure.Failure` objects.
-        """
-        # These arguments will eventually be given to the task executor
-        # so they need to be in a format it will accept (and using keyword
-        # argument names that it accepts)...
-        arguments = {
-            'arguments': arguments,
-        }
-        if result is not None:
-            data_type, data = result
-            if data_type == 'failure':
-                arguments['result'] = ft.Failure.from_dict(data)
-            else:
-                arguments['result'] = data
-        if failures is not None:
-            arguments['failures'] = {}
-            for key, data in six.iteritems(failures):
-                arguments['failures'][key] = ft.Failure.from_dict(data)
-        return (task_cls, task_name, action, arguments)
 
     @staticmethod
     def _parse_message(message):
@@ -199,11 +172,9 @@ class Server(object):
             reply_callback = functools.partial(self._reply, True, reply_to,
                                                task_uuid)
 
-        # parse request to get task name, action and action arguments
+        # Parse the request to get the activity/work to perform.
         try:
-            bundle = self._parse_request(**request)
-            task_cls, task_name, action, arguments = bundle
-            arguments['task_uuid'] = task_uuid
+            work = pr.Request.from_dict(request, task_uuid=task_uuid)
         except ValueError:
             with misc.capture_failure() as failure:
                 LOG.warn("Failed to parse request contents from message '%s'",
@@ -211,34 +182,35 @@ class Server(object):
                 reply_callback(result=failure.to_dict())
                 return
 
-        # get task endpoint
+        # Now fetch the task endpoint (and action handler on it).
         try:
-            endpoint = self._endpoints[task_cls]
+            endpoint = self._endpoints[work.task_cls]
         except KeyError:
             with misc.capture_failure() as failure:
                 LOG.warn("The '%s' task endpoint does not exist, unable"
                          " to continue processing request message '%s'",
-                         task_cls, ku.DelayedPretty(message), exc_info=True)
+                         work.task_cls, ku.DelayedPretty(message),
+                         exc_info=True)
                 reply_callback(result=failure.to_dict())
                 return
         else:
             try:
-                handler = getattr(endpoint, action)
+                handler = getattr(endpoint, work.action)
             except AttributeError:
                 with misc.capture_failure() as failure:
                     LOG.warn("The '%s' handler does not exist on task endpoint"
                              " '%s', unable to continue processing request"
-                             " message '%s'", action, endpoint,
+                             " message '%s'", work.action, endpoint,
                              ku.DelayedPretty(message), exc_info=True)
                     reply_callback(result=failure.to_dict())
                     return
             else:
                 try:
-                    task = endpoint.generate(name=task_name)
+                    task = endpoint.generate(name=work.task_name)
                 except Exception:
                     with misc.capture_failure() as failure:
                         LOG.warn("The '%s' task '%s' generation for request"
-                                 " message '%s' failed", endpoint, action,
+                                 " message '%s' failed", endpoint, work.action,
                                  ku.DelayedPretty(message), exc_info=True)
                         reply_callback(result=failure.to_dict())
                         return
@@ -246,7 +218,7 @@ class Server(object):
                     if not reply_callback(state=pr.RUNNING):
                         return
 
-        # associate *any* events this task emits with a proxy that will
+        # Associate *any* events this task emits with a proxy that will
         # emit them back to the engine... for handling at the engine side
         # of things...
         if task.notifier.can_be_registered(nt.Notifier.ANY):
@@ -254,22 +226,23 @@ class Server(object):
                                    functools.partial(self._on_event,
                                                      reply_to, task_uuid))
         elif isinstance(task.notifier, nt.RestrictedNotifier):
-            # only proxy the allowable events then...
+            # Only proxy the allowable events then...
             for event_type in task.notifier.events_iter():
                 task.notifier.register(event_type,
                                        functools.partial(self._on_event,
                                                          reply_to, task_uuid))
 
-        # perform the task action
+        # Perform the task action.
         try:
-            result = handler(task, **arguments)
+            result = handler(task, **work.arguments)
         except Exception:
             with misc.capture_failure() as failure:
                 LOG.warn("The '%s' endpoint '%s' execution for request"
-                         " message '%s' failed", endpoint, action,
+                         " message '%s' failed", endpoint, work.action,
                          ku.DelayedPretty(message), exc_info=True)
                 reply_callback(result=failure.to_dict())
         else:
+            # And be done with it!
             if isinstance(result, ft.Failure):
                 reply_callback(result=result.to_dict())
             else:

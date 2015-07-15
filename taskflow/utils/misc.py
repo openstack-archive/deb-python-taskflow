@@ -15,6 +15,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import contextlib
 import datetime
 import errno
@@ -23,10 +24,12 @@ import os
 import re
 import sys
 import threading
-import time
 import types
 
+import enum
 from oslo_serialization import jsonutils
+from oslo_serialization import msgpackutils
+from oslo_utils import encodeutils
 from oslo_utils import importutils
 from oslo_utils import netutils
 from oslo_utils import reflection
@@ -45,53 +48,81 @@ NUMERIC_TYPES = six.integer_types + (float,)
 # see RFC 3986 section 3.1
 _SCHEME_REGEX = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
 
-_MONOTONIC_LOCATIONS = tuple([
-    # The built-in/expected location in python3.3+
-    'time.monotonic',
-    # NOTE(harlowja): Try to use the pypi module that provides this
-    # functionality for older versions of python less than 3.3 so that
-    # they to can benefit from better timing...
-    #
-    # See: http://pypi.python.org/pypi/monotonic
-    'monotonic.monotonic',
-])
+
+class StrEnum(str, enum.Enum):
+    """An enumeration that is also a string and can be compared to strings."""
+
+    def __new__(cls, *args, **kwargs):
+        for a in args:
+            if not isinstance(a, str):
+                raise TypeError("Enumeration '%s' (%s) is not"
+                                " a string" % (a, type(a).__name__))
+        return super(StrEnum, cls).__new__(cls, *args, **kwargs)
 
 
-def find_monotonic(allow_time_time=False):
-    """Tries to find a monotonic time providing function (and returns it)."""
-    for import_str in _MONOTONIC_LOCATIONS:
-        mod_str, _sep, attr_str = import_str.rpartition('.')
-        mod = importutils.try_import(mod_str)
-        if mod is None:
-            continue
-        func = getattr(mod, attr_str, None)
-        if func is not None:
-            return func
-    # Finally give up and use time.time (which isn't monotonic)...
-    if allow_time_time:
-        return time.time
+def match_type(obj, matchers):
+    """Matches a given object using the given matchers list/iterable.
+
+    NOTE(harlowja): each element of the provided list/iterable must be
+    tuple of (valid types, result).
+
+    Returns the result (the second element of the provided tuple) if a type
+    match occurs, otherwise none if no matches are found.
+    """
+    for (match_types, match_result) in matchers:
+        if isinstance(obj, match_types):
+            return match_result
     else:
         return None
+
+
+def countdown_iter(start_at, decr=1):
+    """Generator that decrements after each generation until <= zero.
+
+    NOTE(harlowja): we can likely remove this when we can use an
+    ``itertools.count`` that takes a step (on py2.6 which we still support
+    that step parameter does **not** exist and therefore can't be used).
+    """
+    if decr <= 0:
+        raise ValueError("Decrement value must be greater"
+                         " than zero and not %s" % decr)
+    while start_at > 0:
+        yield start_at
+        start_at -= decr
+
+
+def reverse_enumerate(items):
+    """Like reversed(enumerate(items)) but with less copying/cloning..."""
+    for i in countdown_iter(len(items)):
+        yield i - 1, items[i - 1]
 
 
 def merge_uri(uri, conf):
     """Merges a parsed uri into the given configuration dictionary.
 
-    Merges the username, password, hostname, and query params of a uri into
-    the given configuration (it does not overwrite the configuration keys if
-    they already exist) and returns the adjusted configuration.
+    Merges the username, password, hostname, port, and query parameters of
+    a URI into the given configuration dictionary (it does **not** overwrite
+    existing configuration keys if they already exist) and returns the merged
+    configuration.
 
     NOTE(harlowja): does not merge the path, scheme or fragment.
     """
-    for (k, v) in [('username', uri.username), ('password', uri.password)]:
-        if not v:
-            continue
-        conf.setdefault(k, v)
-    if uri.hostname:
-        hostname = uri.hostname
-        if uri.port is not None:
-            hostname += ":%s" % (uri.port)
-        conf.setdefault('hostname', hostname)
+    uri_port = uri.port
+    specials = [
+        ('username', uri.username, lambda v: bool(v)),
+        ('password', uri.password, lambda v: bool(v)),
+        # NOTE(harlowja): A different check function is used since 0 is
+        # false (when bool(v) is applied), and that is a valid port...
+        ('port', uri_port, lambda v: v is not None),
+    ]
+    hostname = uri.hostname
+    if hostname:
+        if uri_port is not None:
+            hostname += ":%s" % (uri_port)
+        specials.append(('hostname', hostname, lambda v: bool(v)))
+    for (k, v, is_not_empty_value_func) in specials:
+        if is_not_empty_value_func(v):
+            conf.setdefault(k, v)
     for (k, v) in six.iteritems(uri.params()):
         conf.setdefault(k, v)
     return conf
@@ -162,6 +193,54 @@ def parse_uri(uri):
     return netutils.urlsplit(uri)
 
 
+def look_for(haystack, needles, extractor=None):
+    """Find items in haystack and returns matches found (in haystack order).
+
+    Given a list of items (the haystack) and a list of items to look for (the
+    needles) this will look for the needles in the haystack and returns
+    the found needles (if any). The ordering of the returned needles is in the
+    order they are located in the haystack.
+
+    Example input and output:
+
+    >>> from taskflow.utils import misc
+    >>> hay = [3, 2, 1]
+    >>> misc.look_for(hay, [1, 2])
+    [2, 1]
+    """
+    if not haystack:
+        return []
+    if extractor is None:
+        extractor = lambda v: v
+    matches = []
+    for i, v in enumerate(needles):
+        try:
+            matches.append((haystack.index(extractor(v)), i))
+        except ValueError:
+            pass
+    if not matches:
+        return []
+    else:
+        return [needles[i] for (_hay_i, i) in sorted(matches)]
+
+
+def disallow_when_frozen(excp_cls):
+    """Frozen checking/raising method decorator."""
+
+    def decorator(f):
+
+        @six.wraps(f)
+        def wrapper(self, *args, **kwargs):
+            if self.frozen:
+                raise excp_cls()
+            else:
+                return f(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 def clamp(value, minimum, maximum, on_clamped=None):
     """Clamps a value to ensure its >= minimum and <= maximum."""
     if minimum > maximum:
@@ -183,45 +262,31 @@ def fix_newlines(text, replacement=os.linesep):
     return replacement.join(text.splitlines())
 
 
-def binary_encode(text, encoding='utf-8'):
-    """Converts a string of into a binary type using given encoding.
+def binary_encode(text, encoding='utf-8', errors='strict'):
+    """Encodes a text string into a binary string using given encoding.
 
-    Does nothing if text not unicode string.
+    Does nothing if data is already a binary string (raises on unknown types).
     """
     if isinstance(text, six.binary_type):
         return text
-    elif isinstance(text, six.text_type):
-        return text.encode(encoding)
     else:
-        raise TypeError("Expected binary or string type not '%s'" % type(text))
+        return encodeutils.safe_encode(text, encoding=encoding,
+                                       errors=errors)
 
 
-def binary_decode(data, encoding='utf-8'):
-    """Converts a binary type into a text type using given encoding.
+def binary_decode(data, encoding='utf-8', errors='strict'):
+    """Decodes a binary string into a text string using given encoding.
 
-    Does nothing if data is already unicode string.
+    Does nothing if data is already a text string (raises on unknown types).
     """
-    if isinstance(data, six.binary_type):
-        return data.decode(encoding)
-    elif isinstance(data, six.text_type):
+    if isinstance(data, six.text_type):
         return data
     else:
-        raise TypeError("Expected binary or string type not '%s'" % type(data))
+        return encodeutils.safe_decode(data, incoming=encoding,
+                                       errors=errors)
 
 
-def decode_json(raw_data, root_types=(dict,)):
-    """Parse raw data to get JSON object.
-
-    Decodes a JSON from a given raw data binary and checks that the root
-    type of that decoded object is in the allowed set of types (by
-    default a JSON object/dict should be the root type).
-    """
-    try:
-        data = jsonutils.loads(binary_decode(raw_data))
-    except UnicodeDecodeError as e:
-        raise ValueError("Expected UTF-8 decodable data: %s" % e)
-    except ValueError as e:
-        raise ValueError("Expected JSON decodable data: %s" % e)
+def _check_decoded_type(data, root_types=(dict,)):
     if root_types:
         if not isinstance(root_types, tuple):
             root_types = tuple(root_types)
@@ -234,6 +299,40 @@ def decode_json(raw_data, root_types=(dict,)):
                 raise ValueError("Expected %s root types not '%s'"
                                  % (list(root_types), type(data)))
     return data
+
+
+def decode_msgpack(raw_data, root_types=(dict,)):
+    """Parse raw data to get decoded object.
+
+    Decodes a msgback encoded 'blob' from a given raw data binary string and
+    checks that the root type of that decoded object is in the allowed set of
+    types (by default a dict should be the root type).
+    """
+    try:
+        data = msgpackutils.loads(raw_data)
+    except Exception as e:
+        # TODO(harlowja): fix this when msgpackutils exposes the msgpack
+        # exceptions so that we can avoid catching just exception...
+        raise ValueError("Expected msgpack decodable data: %s" % e)
+    else:
+        return _check_decoded_type(data, root_types=root_types)
+
+
+def decode_json(raw_data, root_types=(dict,)):
+    """Parse raw data to get decoded object.
+
+    Decodes a JSON encoded 'blob' from a given raw data binary string and
+    checks that the root type of that decoded object is in the allowed set of
+    types (by default a dict should be the root type).
+    """
+    try:
+        data = jsonutils.loads(binary_decode(raw_data))
+    except UnicodeDecodeError as e:
+        raise ValueError("Expected UTF-8 decodable data: %s" % e)
+    except ValueError as e:
+        raise ValueError("Expected JSON decodable data: %s" % e)
+    else:
+        return _check_decoded_type(data, root_types=root_types)
 
 
 class cachedproperty(object):
@@ -404,12 +503,14 @@ def ensure_tree(path):
             raise
 
 
-Failure = deprecation.moved_class(failure.Failure, 'Failure', __name__,
-                                  version="0.6", removal_version="?")
+Failure = deprecation.moved_proxy_class(failure.Failure,
+                                        'Failure', __name__,
+                                        version="0.6", removal_version="2.0")
 
 
-Notifier = deprecation.moved_class(notifier.Notifier, 'Notifier', __name__,
-                                   version="0.6", removal_version="?")
+Notifier = deprecation.moved_proxy_class(notifier.Notifier,
+                                         'Notifier', __name__,
+                                         version="0.6", removal_version="2.0")
 
 
 @contextlib.contextmanager
@@ -458,3 +559,17 @@ def capture_failure():
         raise RuntimeError("No active exception is being handled")
     else:
         yield failure.Failure(exc_info=exc_info)
+
+
+def is_iterable(obj):
+    """Tests an object to to determine whether it is iterable.
+
+    This function will test the specified object to determine whether it is
+    iterable. String types (both ``str`` and ``unicode``) are ignored and will
+    return False.
+
+    :param obj: object to be tested for iterable
+    :return: True if object is iterable and is not a string
+    """
+    return (not isinstance(obj, six.string_types) and
+            isinstance(obj, collections.Iterable))

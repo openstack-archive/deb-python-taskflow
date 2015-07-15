@@ -25,8 +25,8 @@ import six
 LOG = logging.getLogger(__name__)
 
 
-class _Listener(object):
-    """Internal helper that represents a notification listener/target."""
+class Listener(object):
+    """Immutable helper that represents a notification listener/target."""
 
     def __init__(self, callback, args=None, kwargs=None, details_filter=None):
         """Initialize members
@@ -37,7 +37,7 @@ class _Listener(object):
                                the event (thus avoiding the invocation of
                                the actual callback)
         :param args: non-keyworded arguments
-        :type args: list
+        :type args: list/iterable/tuple
         :param kwargs: key-value pair arguments
         :type kwargs: dictionary
         """
@@ -46,21 +46,42 @@ class _Listener(object):
         if not args:
             self._args = ()
         else:
-            self._args = args[:]
+            if not isinstance(args, tuple):
+                self._args = tuple(args)
+            else:
+                self._args = args
         if not kwargs:
             self._kwargs = {}
         else:
             self._kwargs = kwargs.copy()
 
     @property
+    def callback(self):
+        """Callback (can not be none) to call with event + details."""
+        return self._callback
+
+    @property
+    def details_filter(self):
+        """Callback (may be none) to call to discard events + details."""
+        return self._details_filter
+
+    @property
     def kwargs(self):
-        return self._kwargs
+        """Dictionary of keyword arguments to use in future calls."""
+        return self._kwargs.copy()
 
     @property
     def args(self):
+        """Tuple of positional arguments to use in future calls."""
         return self._args
 
     def __call__(self, event_type, details):
+        """Activate the target callback with the given event + details.
+
+        NOTE(harlowja): if a details filter callback exists and it returns
+        a falsey value when called with the provided ``details``, then the
+        target callback will **not** be called.
+        """
         if self._details_filter is not None:
             if not self._details_filter(details):
                 return
@@ -70,7 +91,8 @@ class _Listener(object):
 
     def __repr__(self):
         repr_msg = "%s object at 0x%x calling into '%r'" % (
-            reflection.get_class_name(self), id(self), self._callback)
+            reflection.get_class_name(self, fully_qualified=False),
+            id(self), self._callback)
         if self._details_filter is not None:
             repr_msg += " using details filter '%r'" % self._details_filter
         return "<%s>" % repr_msg
@@ -95,7 +117,7 @@ class _Listener(object):
             return self._details_filter is None
 
     def __eq__(self, other):
-        if isinstance(other, _Listener):
+        if isinstance(other, Listener):
             return self.is_equivalent(other._callback,
                                       details_filter=other._details_filter)
         else:
@@ -103,12 +125,21 @@ class _Listener(object):
 
 
 class Notifier(object):
-    """A notification helper class.
+    """A notification (`pub/sub`_ *like*) helper class.
 
     It is intended to be used to subscribe to notifications of events
     occurring as well as allow a entity to post said notifications to any
     associated subscribers without having either entity care about how this
     notification occurs.
+
+    **Not** thread-safe when a single notifier is mutated at the same
+    time by multiple threads. For example having multiple threads call
+    into :py:meth:`.register` or :py:meth:`.reset` at the same time could
+    potentially end badly. It is thread-safe when
+    only :py:meth:`.notify` calls or other read-only actions (like calling
+    into :py:meth:`.is_registered`) are occuring at the same time.
+
+    .. _pub/sub: http://en.wikipedia.org/wiki/Publish%E2%80%93subscribe_pattern
     """
 
     #: Keys that can *not* be used in callbacks arguments
@@ -121,7 +152,7 @@ class Notifier(object):
     _DISALLOWED_NOTIFICATION_EVENTS = set([ANY])
 
     def __init__(self):
-        self._listeners = collections.defaultdict(list)
+        self._topics = collections.defaultdict(list)
 
     def __len__(self):
         """Returns how many callbacks are registered.
@@ -130,7 +161,7 @@ class Notifier(object):
         :rtype: number
         """
         count = 0
-        for (_event_type, listeners) in six.iteritems(self._listeners):
+        for (_event_type, listeners) in six.iteritems(self._topics):
             count += len(listeners)
         return count
 
@@ -140,14 +171,14 @@ class Notifier(object):
         :returns: checks if the callback is registered
         :rtype: boolean
         """
-        for listener in self._listeners.get(event_type, []):
+        for listener in self._topics.get(event_type, []):
             if listener.is_equivalent(callback, details_filter=details_filter):
                 return True
         return False
 
     def reset(self):
         """Forget all previously registered callbacks."""
-        self._listeners.clear()
+        self._topics.clear()
 
     def notify(self, event_type, details):
         """Notify about event occurrence.
@@ -168,8 +199,8 @@ class Notifier(object):
             LOG.debug("Event type '%s' is not allowed to trigger"
                       " notifications", event_type)
             return
-        listeners = list(self._listeners.get(self.ANY, []))
-        listeners.extend(self._listeners.get(event_type, []))
+        listeners = list(self._topics.get(self.ANY, []))
+        listeners.extend(self._topics.get(event_type, []))
         if not listeners:
             return
         if not details:
@@ -218,21 +249,21 @@ class Notifier(object):
                 if k in kwargs:
                     raise KeyError("Reserved key '%s' not allowed in "
                                    "kwargs" % k)
-        self._listeners[event_type].append(
-            _Listener(callback,
-                      args=args, kwargs=kwargs,
-                      details_filter=details_filter))
+        self._topics[event_type].append(
+            Listener(callback,
+                     args=args, kwargs=kwargs,
+                     details_filter=details_filter))
 
     def deregister(self, event_type, callback, details_filter=None):
         """Remove a single listener bound to event ``event_type``.
 
         :param event_type: deregister listener bound to event_type
         """
-        if event_type not in self._listeners:
+        if event_type not in self._topics:
             return False
-        for i, listener in enumerate(self._listeners.get(event_type, [])):
+        for i, listener in enumerate(self._topics.get(event_type, [])):
             if listener.is_equivalent(callback, details_filter=details_filter):
-                self._listeners[event_type].pop(i)
+                self._topics[event_type].pop(i)
                 return True
         return False
 
@@ -241,18 +272,24 @@ class Notifier(object):
 
         :param event_type: deregister listeners bound to event_type
         """
-        return len(self._listeners.pop(event_type, []))
+        return len(self._topics.pop(event_type, []))
 
     def copy(self):
         c = copy.copy(self)
-        c._listeners = collections.defaultdict(list)
-        for event_type, listeners in six.iteritems(self._listeners):
-            c._listeners[event_type] = listeners[:]
+        c._topics = collections.defaultdict(list)
+        for (event_type, listeners) in six.iteritems(self._topics):
+            c._topics[event_type] = listeners[:]
         return c
 
     def listeners_iter(self):
-        """Return an iterator over the mapping of event => listeners bound."""
-        for event_type, listeners in six.iteritems(self._listeners):
+        """Return an iterator over the mapping of event => listeners bound.
+
+        NOTE(harlowja): Each listener in the yielded (event, listeners)
+        tuple is an instance of the :py:class:`~.Listener`  type, which
+        itself wraps a provided callback (and its details filter
+        callback, if any).
+        """
+        for event_type, listeners in six.iteritems(self._topics):
             if listeners:
                 yield (event_type, listeners)
 

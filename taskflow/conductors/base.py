@@ -15,16 +15,17 @@
 import abc
 import threading
 
+import fasteners
 import six
 
 from taskflow import engines
 from taskflow import exceptions as excp
-from taskflow.utils import lock_utils
+from taskflow.types import notifier
 
 
 @six.add_metaclass(abc.ABCMeta)
 class Conductor(object):
-    """Conductors conduct jobs & assist in associated runtime interactions.
+    """Base for all conductor implementations.
 
     Conductors act as entities which extract jobs from a jobboard, assign
     there work to some engine (using some desired configuration) and then wait
@@ -34,8 +35,8 @@ class Conductor(object):
     period of time will finish up the prior failed conductors work.
     """
 
-    def __init__(self, name, jobboard, persistence,
-                 engine=None, engine_options=None):
+    def __init__(self, name, jobboard,
+                 persistence=None, engine=None, engine_options=None):
         self._name = name
         self._jobboard = jobboard
         self._engine = engine
@@ -45,6 +46,18 @@ class Conductor(object):
             self._engine_options = engine_options.copy()
         self._persistence = persistence
         self._lock = threading.RLock()
+        self._notifier = notifier.Notifier()
+
+    @property
+    def notifier(self):
+        """The conductor actions (or other state changes) notifier.
+
+        NOTE(harlowja): different conductor implementations may emit
+        different events + event details at different times, so refer to your
+        conductor documentation to know exactly what can and what can not be
+        subscribed to.
+        """
+        return self._notifier
 
     def _flow_detail_from_job(self, job):
         """Extracts a flow detail from a job (via some manner).
@@ -88,20 +101,36 @@ class Conductor(object):
             store = dict(job.details["store"])
         else:
             store = {}
-        return engines.load_from_detail(flow_detail, store=store,
-                                        engine=self._engine,
-                                        backend=self._persistence,
-                                        **self._engine_options)
+        engine = engines.load_from_detail(flow_detail, store=store,
+                                          engine=self._engine,
+                                          backend=self._persistence,
+                                          **self._engine_options)
+        return engine
 
-    @lock_utils.locked
+    def _listeners_from_job(self, job, engine):
+        """Returns a list of listeners to be attached to an engine.
+
+        This method should be overridden in order to attach listeners to
+        engines. It will be called once for each job, and the list returned
+        listeners will be added to the engine for this job.
+
+        :param job: A job instance that is about to be run in an engine.
+        :param engine: The engine that listeners will be attached to.
+        :returns: a list of (unregistered) listener instances.
+        """
+        # TODO(dkrause): Create a standard way to pass listeners or
+        #                listener factories over the jobboard
+        return []
+
+    @fasteners.locked
     def connect(self):
         """Ensures the jobboard is connected (noop if it is already)."""
         if not self._jobboard.connected:
             self._jobboard.connect()
 
-    @lock_utils.locked
+    @fasteners.locked
     def close(self):
-        """Closes the jobboard, disallowing further use."""
+        """Closes the contained jobboard, disallowing further use."""
         self._jobboard.close()
 
     @abc.abstractmethod

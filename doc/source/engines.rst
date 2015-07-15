@@ -17,11 +17,13 @@ and *ideal* is that deployers or developers of a service that use TaskFlow can
 select an engine that suites their setup best without modifying the code of
 said service.
 
-Engines usually have different capabilities and configuration, but all of them
-**must** implement the same interface and preserve the semantics of patterns
-(e.g. parts of a :py:class:`.linear_flow.Flow`
-are run one after another, in order, even if the selected engine is *capable*
-of running tasks in parallel).
+.. note::
+
+    Engines usually have different capabilities and configuration, but all of
+    them **must** implement the same interface and preserve the semantics of
+    patterns (e.g. parts of a :py:class:`.linear_flow.Flow`
+    are run one after another, in order, even if the selected
+    engine is *capable* of running tasks in parallel).
 
 Why they exist
 --------------
@@ -29,7 +31,7 @@ Why they exist
 An engine being *the* core component which actually makes your flows progress
 is likely a new concept for many programmers so let's describe how it operates
 in more depth and some of the reasoning behind why it exists. This will
-hopefully make it more clear on there value add to the TaskFlow library user.
+hopefully make it more clear on their value add to the TaskFlow library user.
 
 First though let us discuss something most are familiar already with; the
 difference between `declarative`_ and `imperative`_ programming models. The
@@ -57,7 +59,7 @@ declarative model) allows for the following functionality to become possible:
   accomplished allows for a *natural* way of resuming by allowing the engine to
   track the current state and know at which point a workflow is in and how to
   get back into that state when resumption occurs.
-* Enhancing scalability: When a engine is responsible for executing your
+* Enhancing scalability: When an engine is responsible for executing your
   desired work it becomes possible to alter the *how* in the future by creating
   new types of execution backends (for example the `worker`_ model which does
   not execute locally). Without the decoupling of the *what* and the *how* it
@@ -172,13 +174,13 @@ using your desired execution model.
     scalability by reducing thread/process creation and teardown as well as by
     reusing existing pools (which is a good practice in general).
 
-.. note::
+.. warning::
 
     Running tasks with a `process pool executor`_ is **experimentally**
     supported. This is mainly due to the `futures backport`_ and
     the `multiprocessing`_ module that exist in older versions of python not
     being as up to date (with important fixes such as :pybug:`4892`,
-    :pybug:`6721`, :pybug:`9205`, :pybug:`11635`, :pybug:`16284`,
+    :pybug:`6721`, :pybug:`9205`, :pybug:`16284`,
     :pybug:`22393` and others...) as the most recent python version (which
     themselves have a variety of ongoing/recent bugs).
 
@@ -203,7 +205,7 @@ For further information, please refer to the the following:
 How they run
 ============
 
-To provide a peek into the general process that a engine goes through when
+To provide a peek into the general process that an engine goes through when
 running lets break it apart a little and describe what one of the engine types
 does while executing (for this we will look into the
 :py:class:`~taskflow.engines.action_engine.engine.ActionEngine` engine type).
@@ -221,39 +223,48 @@ are setup.
 Compiling
 ---------
 
-During this stage the flow will be converted into an internal graph
-representation using a
-:py:class:`~taskflow.engines.action_engine.compiler.Compiler` (the default
-implementation for patterns is the
+During this stage (see :py:func:`~taskflow.engines.base.Engine.compile`) the
+flow will be converted into an internal graph representation using a
+compiler (the default implementation for patterns is the
 :py:class:`~taskflow.engines.action_engine.compiler.PatternCompiler`). This
 class compiles/converts the flow objects and contained atoms into a
-`networkx`_ directed graph that contains the equivalent atoms defined in the
-flow and any nested flows & atoms as well as the constraints that are created
-by the application of the different flow patterns. This graph is then what will
-be analyzed & traversed during the engines execution. At this point a few
-helper object are also created and saved to internal engine variables (these
-object help in execution of atoms, analyzing the graph and performing other
-internal engine activities). At the finishing of this stage a
+`networkx`_ directed graph (and tree structure) that contains the equivalent
+atoms defined in the flow and any nested flows & atoms as well as the
+constraints that are created by the application of the different flow
+patterns. This graph (and tree) are what will be analyzed & traversed during
+the engines execution. At this point a few helper object are also created and
+saved to internal engine variables (these object help in execution of
+atoms, analyzing the graph and performing other internal engine
+activities). At the finishing of this stage a
 :py:class:`~taskflow.engines.action_engine.runtime.Runtime` object is created
-which contains references to all needed runtime components.
+which contains references to all needed runtime components and its
+:py:func:`~taskflow.engines.action_engine.runtime.Runtime.compile` is called
+to compile a cache of frequently used execution helper objects.
 
 Preparation
 -----------
 
-This stage starts by setting up the storage needed for all atoms in the
-previously created graph, ensuring that corresponding
-:py:class:`~taskflow.persistence.logbook.AtomDetail` (or subclass of) objects
-are created for each node in the graph. Once this is done final validation
-occurs on the requirements that are needed to start execution and what
-:py:class:`~taskflow.storage.Storage` provides.  If there is any atom or flow
-requirements not satisfied then execution will not be allowed to continue.
+This stage (see :py:func:`~taskflow.engines.base.Engine.prepare`) starts by
+setting up the storage needed for all atoms in the compiled graph, ensuring
+that corresponding :py:class:`~taskflow.persistence.models.AtomDetail` (or
+subclass of) objects are created for each node in the graph.
+
+Validation
+----------
+
+This stage (see :py:func:`~taskflow.engines.base.Engine.validate`) performs
+any final validation of the compiled (and now storage prepared) engine. It
+compares the requirements that are needed to start execution and
+what is currently provided or will be produced in the future. If there are
+*any* atom requirements that are not satisfied (no known current provider or
+future producer is found) then execution will **not** be allowed to continue.
 
 Execution
 ---------
 
 The graph (and helper objects) previously created are now used for guiding
-further execution. The flow is put into the ``RUNNING`` :doc:`state <states>`
-and a
+further execution (see :py:func:`~taskflow.engines.base.Engine.run`). The
+flow is put into the ``RUNNING`` :doc:`state <states>` and a
 :py:class:`~taskflow.engines.action_engine.runner.Runner` implementation
 object starts to take over and begins going through the stages listed
 below (for a more visual diagram/representation see
@@ -262,10 +273,10 @@ the :ref:`engine state diagram <engine states>`).
 .. note::
 
    The engine will respect the constraints imposed by the flow. For example,
-   if Engine is executing a :py:class:`.linear_flow.Flow` then it is
-   constrained by the dependency-graph which is linear in this case, and hence
-   using a Parallel Engine may not yield any benefits if one is looking for
-   concurrency.
+   if an engine is executing a :py:class:`~taskflow.patterns.linear_flow.Flow`
+   then it is constrained by the dependency graph which is linear in this
+   case, and hence using a parallel engine may not yield any benefits if one
+   is looking for concurrency.
 
 Resumption
 ^^^^^^^^^^
@@ -282,7 +293,7 @@ for things like retry atom which can influence what a tasks intention should be
 :py:class:`~taskflow.engines.action_engine.analyzer.Analyzer` helper
 object which was designed to provide helper methods for this analysis). Once
 these intentions are determined and associated with each task (the intention is
-also stored in the :py:class:`~taskflow.persistence.logbook.AtomDetail` object)
+also stored in the :py:class:`~taskflow.persistence.models.AtomDetail` object)
 the :ref:`scheduling <scheduling>` stage starts.
 
 .. _scheduling:
@@ -292,7 +303,7 @@ Scheduling
 
 This stage selects which atoms are eligible to run by using a
 :py:class:`~taskflow.engines.action_engine.scheduler.Scheduler` implementation
-(the default implementation looks at there intention, checking if predecessor
+(the default implementation looks at their intention, checking if predecessor
 atoms have ran and so-on, using a
 :py:class:`~taskflow.engines.action_engine.analyzer.Analyzer` helper
 object as needed) and submits those atoms to a previously provided compatible
@@ -312,15 +323,15 @@ submitted to complete. Once one of the future objects completes (or fails) that
 atoms result will be examined and finalized using a
 :py:class:`~taskflow.engines.action_engine.completer.Completer` implementation.
 It typically will persist results to a provided persistence backend (saved
-into the corresponding :py:class:`~taskflow.persistence.logbook.AtomDetail`
-and :py:class:`~taskflow.persistence.logbook.FlowDetail` objects via the
+into the corresponding :py:class:`~taskflow.persistence.models.AtomDetail`
+and :py:class:`~taskflow.persistence.models.FlowDetail` objects via the
 :py:class:`~taskflow.storage.Storage` helper) and reflect
 the new state of the atom. At this point what typically happens falls into two
 categories, one for if that atom failed and one for if it did not. If the atom
 failed it may be set to a new intention such as ``RETRY`` or
 ``REVERT`` (other atoms that were predecessors of this failing atom may also
 have there intention altered). Once this intention adjustment has happened a
-new round of :ref:`scheduling <scheduling>`  occurs and this process repeats
+new round of :ref:`scheduling <scheduling>` occurs and this process repeats
 until the engine succeeds or fails (if the process running the engine dies the
 above stages will be restarted and resuming will occur).
 
@@ -328,8 +339,8 @@ above stages will be restarted and resuming will occur).
 
     If the engine is suspended while the engine is going through the above
     stages this will stop any further scheduling stages from occurring and
-    all currently executing atoms will be allowed to finish (and there results
-    will be saved).
+    all currently executing work will be allowed to finish (see
+    :ref:`suspension <suspension>`).
 
 Finishing
 ---------
@@ -346,6 +357,79 @@ failures have occurred then the engine will have finished and if so desired the
 :doc:`persistence <persistence>` can be used to cleanup any details that were
 saved for this execution.
 
+Special cases
+=============
+
+.. _suspension:
+
+Suspension
+----------
+
+Each engine implements a :py:func:`~taskflow.engines.base.Engine.suspend`
+method that can be used to *externally* (or in the future *internally*) request
+that the engine stop :ref:`scheduling <scheduling>` new work. By default what
+this performs is a transition of the flow state from ``RUNNING`` into a
+``SUSPENDING`` state (which will later transition into a ``SUSPENDED`` state).
+Since an engine may be remotely executing atoms (or locally executing them)
+and there is currently no preemption what occurs is that the engines
+:py:class:`~taskflow.engines.action_engine.runner.Runner` state machine will
+detect this transition into ``SUSPENDING`` has occurred and the state
+machine will avoid scheduling new work (it will though let active work
+continue). After the current work has finished the engine will
+transition from ``SUSPENDING`` into ``SUSPENDED`` and return from its
+:py:func:`~taskflow.engines.base.Engine.run` method.
+
+
+.. note::
+
+    When :py:func:`~taskflow.engines.base.Engine.run`  is returned from at that
+    point there *may* (but does not have to be, depending on what was active
+    when :py:func:`~taskflow.engines.base.Engine.suspend` was called) be
+    unfinished work in the flow that was not finished (but which can be
+    resumed at a later point in time).
+
+Scoping
+=======
+
+During creation of flows it is also important to understand the lookup
+strategy (also typically known as `scope`_ resolution) that the engine you
+are using will internally use. For example when a task ``A`` provides
+result 'a' and a task ``B`` after ``A`` provides a different result 'a' and a
+task ``C`` after ``A`` and after ``B`` requires 'a' to run, which one will
+be selected?
+
+Default strategy
+----------------
+
+When an engine is executing it internally interacts with the
+:py:class:`~taskflow.storage.Storage` class
+and that class interacts with the a
+:py:class:`~taskflow.engines.action_engine.scopes.ScopeWalker` instance
+and the :py:class:`~taskflow.storage.Storage` class uses the following
+lookup order to find (or fail) a atoms requirement lookup/request:
+
+#. Transient injected atom specific arguments.
+#. Non-transient injected atom specific arguments.
+#. Transient injected arguments (flow specific).
+#. Non-transient injected arguments (flow specific).
+#. First scope visited provider that produces the named result; note that
+   if multiple providers are found in the same scope the *first* (the scope
+   walkers yielded ordering defines what *first* means) that produced that
+   result *and* can be extracted without raising an error is selected as the
+   provider of the requested requirement.
+#. Fails with :py:class:`~taskflow.exceptions.NotFound` if unresolved at this
+   point (the ``cause`` attribute of this exception may have more details on
+   why the lookup failed).
+
+.. note::
+
+    To examine this this information when debugging it is recommended to
+    enable the ``BLATHER`` logging level (level 5). At this level the storage
+    and scope code/layers will log what is being searched for and what is
+    being found.
+
+.. _scope: http://en.wikipedia.org/wiki/Scope_%28computer_science%29
+
 Interfaces
 ==========
 
@@ -354,15 +438,27 @@ Interfaces
 Implementations
 ===============
 
+.. automodule:: taskflow.engines.action_engine.engine
+
+Components
+----------
+
+.. warning::
+
+    External usage of internal engine functions, components and modules should
+    be kept to a **minimum** as they may be altered, refactored or moved to
+    other locations **without** notice (and without the typical deprecation
+    cycle).
+
 .. automodule:: taskflow.engines.action_engine.analyzer
 .. automodule:: taskflow.engines.action_engine.compiler
 .. automodule:: taskflow.engines.action_engine.completer
-.. automodule:: taskflow.engines.action_engine.engine
 .. automodule:: taskflow.engines.action_engine.executor
 .. automodule:: taskflow.engines.action_engine.runner
 .. automodule:: taskflow.engines.action_engine.runtime
 .. automodule:: taskflow.engines.action_engine.scheduler
-.. automodule:: taskflow.engines.action_engine.scopes
+.. autoclass:: taskflow.engines.action_engine.scopes.ScopeWalker
+    :special-members: __iter__
 
 Hierarchy
 =========

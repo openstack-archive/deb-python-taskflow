@@ -15,7 +15,10 @@
 #    under the License.
 
 import contextlib
+import functools
 
+import futurist
+import six
 import testtools
 
 import taskflow.engines
@@ -26,13 +29,12 @@ from taskflow import exceptions as exc
 from taskflow.patterns import graph_flow as gf
 from taskflow.patterns import linear_flow as lf
 from taskflow.patterns import unordered_flow as uf
-from taskflow.persistence import logbook
+from taskflow.persistence import models
 from taskflow import states
 from taskflow import task
 from taskflow import test
 from taskflow.tests import utils
 from taskflow.types import failure
-from taskflow.types import futures
 from taskflow.types import graph as gr
 from taskflow.utils import eventlet_utils as eu
 from taskflow.utils import persistence_utils as p_utils
@@ -149,12 +151,147 @@ class EngineOptionalRequirementsTest(utils.EngineTestBase):
         self.assertEqual(result, {'a': 3, 'b': 7, 'result': 3000})
 
 
+class EngineMultipleResultsTest(utils.EngineTestBase):
+    def test_fetch_with_a_single_result(self):
+        flow = lf.Flow("flow")
+        flow.add(utils.TaskOneReturn(provides='x'))
+
+        engine = self._make_engine(flow)
+        engine.run()
+        result = engine.storage.fetch('x')
+        self.assertEqual(result, 1)
+
+    def test_many_results_visible_to(self):
+        flow = lf.Flow("flow")
+        flow.add(utils.AddOneSameProvidesRequires(
+            'a', rebind={'value': 'source'}))
+        flow.add(utils.AddOneSameProvidesRequires('b'))
+        flow.add(utils.AddOneSameProvidesRequires('c'))
+        engine = self._make_engine(flow, store={'source': 0})
+        engine.run()
+
+        # Check what each task in the prior should be seeing...
+        atoms = list(flow)
+        a = atoms[0]
+        a_kwargs = engine.storage.fetch_mapped_args(a.rebind,
+                                                    atom_name='a')
+        self.assertEqual({'value': 0}, a_kwargs)
+
+        b = atoms[1]
+        b_kwargs = engine.storage.fetch_mapped_args(b.rebind,
+                                                    atom_name='b')
+        self.assertEqual({'value': 1}, b_kwargs)
+
+        c = atoms[2]
+        c_kwargs = engine.storage.fetch_mapped_args(c.rebind,
+                                                    atom_name='c')
+        self.assertEqual({'value': 2}, c_kwargs)
+
+    def test_many_results_storage_provided_visible_to(self):
+        # This works as expected due to docs listed at
+        #
+        # http://docs.openstack.org/developer/taskflow/engines.html#scoping
+        flow = lf.Flow("flow")
+        flow.add(utils.AddOneSameProvidesRequires('a'))
+        flow.add(utils.AddOneSameProvidesRequires('b'))
+        flow.add(utils.AddOneSameProvidesRequires('c'))
+        engine = self._make_engine(flow, store={'value': 0})
+        engine.run()
+
+        # Check what each task in the prior should be seeing...
+        atoms = list(flow)
+        a = atoms[0]
+        a_kwargs = engine.storage.fetch_mapped_args(a.rebind,
+                                                    atom_name='a')
+        self.assertEqual({'value': 0}, a_kwargs)
+
+        b = atoms[1]
+        b_kwargs = engine.storage.fetch_mapped_args(b.rebind,
+                                                    atom_name='b')
+        self.assertEqual({'value': 0}, b_kwargs)
+
+        c = atoms[2]
+        c_kwargs = engine.storage.fetch_mapped_args(c.rebind,
+                                                    atom_name='c')
+        self.assertEqual({'value': 0}, c_kwargs)
+
+    def test_fetch_with_two_results(self):
+        flow = lf.Flow("flow")
+        flow.add(utils.TaskOneReturn(provides='x'))
+
+        engine = self._make_engine(flow, store={'x': 0})
+        engine.run()
+        result = engine.storage.fetch('x')
+        self.assertEqual(result, 0)
+
+    def test_fetch_all_with_a_single_result(self):
+        flow = lf.Flow("flow")
+        flow.add(utils.TaskOneReturn(provides='x'))
+
+        engine = self._make_engine(flow)
+        engine.run()
+        result = engine.storage.fetch_all()
+        self.assertEqual(result, {'x': 1})
+
+    def test_fetch_all_with_two_results(self):
+        flow = lf.Flow("flow")
+        flow.add(utils.TaskOneReturn(provides='x'))
+
+        engine = self._make_engine(flow, store={'x': 0})
+        engine.run()
+        result = engine.storage.fetch_all()
+        self.assertEqual(result, {'x': [0, 1]})
+
+    def test_task_can_update_value(self):
+        flow = lf.Flow("flow")
+        flow.add(utils.TaskOneArgOneReturn(requires='x', provides='x'))
+
+        engine = self._make_engine(flow, store={'x': 0})
+        engine.run()
+        result = engine.storage.fetch_all()
+        self.assertEqual(result, {'x': [0, 1]})
+
+
 class EngineLinearFlowTest(utils.EngineTestBase):
 
     def test_run_empty_flow(self):
         flow = lf.Flow('flow-1')
         engine = self._make_engine(flow)
         self.assertRaises(exc.Empty, engine.run)
+
+    def test_overlap_parent_sibling_expected_result(self):
+        flow = lf.Flow('flow-1')
+        flow.add(utils.ProgressingTask(provides='source'))
+        flow.add(utils.TaskOneReturn(provides='source'))
+        subflow = lf.Flow('flow-2')
+        subflow.add(utils.AddOne())
+        flow.add(subflow)
+        engine = self._make_engine(flow)
+        engine.run()
+        results = engine.storage.fetch_all()
+        self.assertEqual(2, results['result'])
+
+    def test_overlap_parent_expected_result(self):
+        flow = lf.Flow('flow-1')
+        flow.add(utils.ProgressingTask(provides='source'))
+        subflow = lf.Flow('flow-2')
+        subflow.add(utils.TaskOneReturn(provides='source'))
+        subflow.add(utils.AddOne())
+        flow.add(subflow)
+        engine = self._make_engine(flow)
+        engine.run()
+        results = engine.storage.fetch_all()
+        self.assertEqual(2, results['result'])
+
+    def test_overlap_sibling_expected_result(self):
+        flow = lf.Flow('flow-1')
+        flow.add(utils.ProgressingTask(provides='source'))
+        flow.add(utils.TaskOneReturn(provides='source'))
+        flow.add(utils.AddOne())
+        engine = self._make_engine(flow)
+        engine.run()
+        results = engine.storage.fetch_all()
+        self.assertEqual(2, results['result'])
 
     def test_sequential_flow_one_task(self):
         flow = lf.Flow('flow-1').add(
@@ -358,7 +495,7 @@ class EngineParallelFlowTest(utils.EngineTestBase):
 
         # Create FlowDetail as if we already run task1
         lb, fd = p_utils.temporary_flow_detail(self.backend)
-        td = logbook.TaskDetail(name='task1', uuid='42')
+        td = models.TaskDetail(name='task1', uuid='42')
         td.state = states.SUCCESS
         td.results = 17
         fd.add(td)
@@ -617,6 +754,146 @@ class EngineGraphFlowTest(utils.EngineTestBase):
         self.assertIsInstance(graph, gr.DiGraph)
 
 
+class EngineMissingDepsTest(utils.EngineTestBase):
+    def test_missing_deps_deep(self):
+        flow = gf.Flow('missing-many').add(
+            utils.TaskOneReturn(name='task1',
+                                requires=['a', 'b', 'c']),
+            utils.TaskMultiArgOneReturn(name='task2',
+                                        rebind=['e', 'f', 'g']))
+        engine = self._make_engine(flow)
+        engine.compile()
+        engine.prepare()
+        self.assertRaises(exc.MissingDependencies, engine.validate)
+        c_e = None
+        try:
+            engine.validate()
+        except exc.MissingDependencies as e:
+            c_e = e
+        self.assertIsNotNone(c_e)
+        self.assertIsNotNone(c_e.cause)
+
+
+class EngineGraphConditionalFlowTest(utils.EngineTestBase):
+
+    def test_graph_flow_conditional(self):
+        flow = gf.Flow('root')
+
+        task1 = utils.ProgressingTask(name='task1')
+        task2 = utils.ProgressingTask(name='task2')
+        task2_2 = utils.ProgressingTask(name='task2_2')
+        task3 = utils.ProgressingTask(name='task3')
+
+        flow.add(task1, task2, task2_2, task3)
+        flow.link(task1, task2, decider=lambda history: False)
+        flow.link(task2, task2_2)
+        flow.link(task1, task3, decider=lambda history: True)
+
+        engine = self._make_engine(flow)
+        with utils.CaptureListener(engine, capture_flow=False) as capturer:
+            engine.run()
+
+        expected = set([
+            'task1.t RUNNING',
+            'task1.t SUCCESS(5)',
+
+            'task2.t IGNORE',
+            'task2_2.t IGNORE',
+
+            'task3.t RUNNING',
+            'task3.t SUCCESS(5)',
+        ])
+        self.assertEqual(expected, set(capturer.values))
+
+    def test_graph_flow_diamond_ignored(self):
+        flow = gf.Flow('root')
+
+        task1 = utils.ProgressingTask(name='task1')
+        task2 = utils.ProgressingTask(name='task2')
+        task3 = utils.ProgressingTask(name='task3')
+        task4 = utils.ProgressingTask(name='task4')
+
+        flow.add(task1, task2, task3, task4)
+        flow.link(task1, task2)
+        flow.link(task2, task4, decider=lambda history: False)
+        flow.link(task1, task3)
+        flow.link(task3, task4, decider=lambda history: True)
+
+        engine = self._make_engine(flow)
+        with utils.CaptureListener(engine, capture_flow=False) as capturer:
+            engine.run()
+
+        expected = set([
+            'task1.t RUNNING',
+            'task1.t SUCCESS(5)',
+
+            'task2.t RUNNING',
+            'task2.t SUCCESS(5)',
+
+            'task3.t RUNNING',
+            'task3.t SUCCESS(5)',
+
+            'task4.t IGNORE',
+        ])
+        self.assertEqual(expected, set(capturer.values))
+        self.assertEqual(states.IGNORE,
+                         engine.storage.get_atom_state('task4'))
+        self.assertEqual(states.IGNORE,
+                         engine.storage.get_atom_intention('task4'))
+
+    def test_graph_flow_conditional_history(self):
+
+        def even_odd_decider(history, allowed):
+            total = sum(six.itervalues(history))
+            if total == allowed:
+                return True
+            return False
+
+        flow = gf.Flow('root')
+
+        task1 = utils.TaskMultiArgOneReturn(name='task1')
+        task2 = utils.ProgressingTask(name='task2')
+        task2_2 = utils.ProgressingTask(name='task2_2')
+        task3 = utils.ProgressingTask(name='task3')
+        task3_3 = utils.ProgressingTask(name='task3_3')
+
+        flow.add(task1, task2, task2_2, task3, task3_3)
+        flow.link(task1, task2,
+                  decider=functools.partial(even_odd_decider, allowed=2))
+        flow.link(task2, task2_2)
+
+        flow.link(task1, task3,
+                  decider=functools.partial(even_odd_decider, allowed=1))
+        flow.link(task3, task3_3)
+
+        engine = self._make_engine(flow)
+        engine.storage.inject({'x': 0, 'y': 1, 'z': 1})
+
+        with utils.CaptureListener(engine, capture_flow=False) as capturer:
+            engine.run()
+
+        expected = set([
+            'task1.t RUNNING', 'task1.t SUCCESS(2)',
+            'task3.t IGNORE', 'task3_3.t IGNORE',
+            'task2.t RUNNING', 'task2.t SUCCESS(5)',
+            'task2_2.t RUNNING', 'task2_2.t SUCCESS(5)',
+        ])
+        self.assertEqual(expected, set(capturer.values))
+
+        engine = self._make_engine(flow)
+        engine.storage.inject({'x': 0, 'y': 0, 'z': 1})
+        with utils.CaptureListener(engine, capture_flow=False) as capturer:
+            engine.run()
+
+        expected = set([
+            'task1.t RUNNING', 'task1.t SUCCESS(1)',
+            'task2.t IGNORE', 'task2_2.t IGNORE',
+            'task3.t RUNNING', 'task3.t SUCCESS(5)',
+            'task3_3.t RUNNING', 'task3_3.t SUCCESS(5)',
+        ])
+        self.assertEqual(expected, set(capturer.values))
+
+
 class EngineCheckingTaskTest(utils.EngineTestBase):
     # FIXME: this test uses a inner class that workers/process engines can't
     # get to, so we need to do something better to make this test useful for
@@ -643,11 +920,14 @@ class EngineCheckingTaskTest(utils.EngineTestBase):
 
 
 class SerialEngineTest(EngineTaskTest,
+                       EngineMultipleResultsTest,
                        EngineLinearFlowTest,
                        EngineParallelFlowTest,
                        EngineLinearAndUnorderedExceptionsTest,
                        EngineOptionalRequirementsTest,
                        EngineGraphFlowTest,
+                       EngineMissingDepsTest,
+                       EngineGraphConditionalFlowTest,
                        EngineCheckingTaskTest,
                        test.TestCase):
     def _make_engine(self, flow,
@@ -668,11 +948,14 @@ class SerialEngineTest(EngineTaskTest,
 
 
 class ParallelEngineWithThreadsTest(EngineTaskTest,
+                                    EngineMultipleResultsTest,
                                     EngineLinearFlowTest,
                                     EngineParallelFlowTest,
                                     EngineLinearAndUnorderedExceptionsTest,
                                     EngineOptionalRequirementsTest,
                                     EngineGraphFlowTest,
+                                    EngineMissingDepsTest,
+                                    EngineGraphConditionalFlowTest,
                                     EngineCheckingTaskTest,
                                     test.TestCase):
     _EXECUTOR_WORKERS = 2
@@ -694,7 +977,7 @@ class ParallelEngineWithThreadsTest(EngineTaskTest,
 
     def test_using_common_executor(self):
         flow = utils.TaskNoRequiresNoReturns(name='task1')
-        executor = futures.ThreadPoolExecutor(self._EXECUTOR_WORKERS)
+        executor = futurist.ThreadPoolExecutor(self._EXECUTOR_WORKERS)
         try:
             e1 = self._make_engine(flow, executor=executor)
             e2 = self._make_engine(flow, executor=executor)
@@ -705,18 +988,21 @@ class ParallelEngineWithThreadsTest(EngineTaskTest,
 
 @testtools.skipIf(not eu.EVENTLET_AVAILABLE, 'eventlet is not available')
 class ParallelEngineWithEventletTest(EngineTaskTest,
+                                     EngineMultipleResultsTest,
                                      EngineLinearFlowTest,
                                      EngineParallelFlowTest,
                                      EngineLinearAndUnorderedExceptionsTest,
                                      EngineOptionalRequirementsTest,
                                      EngineGraphFlowTest,
+                                     EngineMissingDepsTest,
+                                     EngineGraphConditionalFlowTest,
                                      EngineCheckingTaskTest,
                                      test.TestCase):
 
     def _make_engine(self, flow,
                      flow_detail=None, executor=None, store=None):
         if executor is None:
-            executor = futures.GreenThreadPoolExecutor()
+            executor = futurist.GreenThreadPoolExecutor()
             self.addCleanup(executor.shutdown)
         return taskflow.engines.load(flow, flow_detail=flow_detail,
                                      backend=self.backend, engine='parallel',
@@ -725,11 +1011,14 @@ class ParallelEngineWithEventletTest(EngineTaskTest,
 
 
 class ParallelEngineWithProcessTest(EngineTaskTest,
+                                    EngineMultipleResultsTest,
                                     EngineLinearFlowTest,
                                     EngineParallelFlowTest,
                                     EngineLinearAndUnorderedExceptionsTest,
                                     EngineOptionalRequirementsTest,
                                     EngineGraphFlowTest,
+                                    EngineMissingDepsTest,
+                                    EngineGraphConditionalFlowTest,
                                     test.TestCase):
     _EXECUTOR_WORKERS = 2
 
@@ -750,11 +1039,14 @@ class ParallelEngineWithProcessTest(EngineTaskTest,
 
 
 class WorkerBasedEngineTest(EngineTaskTest,
+                            EngineMultipleResultsTest,
                             EngineLinearFlowTest,
                             EngineParallelFlowTest,
                             EngineLinearAndUnorderedExceptionsTest,
                             EngineOptionalRequirementsTest,
                             EngineGraphFlowTest,
+                            EngineMissingDepsTest,
+                            EngineGraphConditionalFlowTest,
                             test.TestCase):
     def setUp(self):
         super(WorkerBasedEngineTest, self).setUp()

@@ -16,6 +16,7 @@
 
 import contextlib
 import logging
+import threading
 import time
 
 from oslo_serialization import jsonutils
@@ -38,7 +39,6 @@ from taskflow.test import mock
 from taskflow.tests import utils as test_utils
 from taskflow.utils import misc
 from taskflow.utils import persistence_utils
-from taskflow.utils import threading_utils
 
 
 _LOG_LEVELS = frozenset([
@@ -89,7 +89,7 @@ class TestClaimListener(test.TestCase, EngineMakerMixin):
         self.board.connect()
 
     def _post_claim_job(self, job_name, book=None, details=None):
-        arrived = threading_utils.Event()
+        arrived = threading.Event()
 
         def set_on_children(children):
             if children:
@@ -202,14 +202,25 @@ class TestClaimListener(test.TestCase, EngineMakerMixin):
         self.assertEqual(1, ran_states.count(states.WAITING))
 
 
-class TestTimingListener(test.TestCase, EngineMakerMixin):
+class TestDurationListener(test.TestCase, EngineMakerMixin):
+    def test_deregister(self):
+        """Verify that register and deregister don't blow up"""
+        with contextlib.closing(impl_memory.MemoryBackend()) as be:
+            flow = lf.Flow("test")
+            flow.add(SleepyTask("test-1", sleep_for=0.1))
+            (lb, fd) = persistence_utils.temporary_flow_detail(be)
+            e = self._make_engine(flow, fd, be)
+            l = timing.DurationListener(e)
+            l.register()
+            l.deregister()
+
     def test_duration(self):
         with contextlib.closing(impl_memory.MemoryBackend()) as be:
             flow = lf.Flow("test")
             flow.add(SleepyTask("test-1", sleep_for=0.1))
             (lb, fd) = persistence_utils.temporary_flow_detail(be)
             e = self._make_engine(flow, fd, be)
-            with timing.TimingListener(e):
+            with timing.DurationListener(e):
                 e.run()
             t_uuid = e.storage.get_atom_uuid("test-1")
             td = fd.find(t_uuid)
@@ -225,14 +236,49 @@ class TestTimingListener(test.TestCase, EngineMakerMixin):
             flow.add(test_utils.TaskNoRequiresNoReturns("test-1"))
             (lb, fd) = persistence_utils.temporary_flow_detail(be)
             e = self._make_engine(flow, fd, be)
-            timing_listener = timing.TimingListener(e)
-            with mock.patch.object(timing_listener._engine.storage,
+            duration_listener = timing.DurationListener(e)
+            with mock.patch.object(duration_listener._engine.storage,
                                    'update_atom_metadata') as mocked_uam:
                 mocked_uam.side_effect = exc.StorageFailure('Woot!')
-                with timing_listener:
+                with duration_listener:
                     e.run()
         mocked_warn.assert_called_once_with(mock.ANY, mock.ANY, 'test-1',
                                             exc_info=True)
+
+
+class TestEventTimeListener(test.TestCase, EngineMakerMixin):
+    def test_event_time(self):
+        flow = lf.Flow('flow1').add(SleepyTask("task1", sleep_for=0.1))
+        engine = self._make_engine(flow)
+        with timing.EventTimeListener(engine):
+            engine.run()
+        t_uuid = engine.storage.get_atom_uuid("task1")
+        td = engine.storage._flowdetail.find(t_uuid)
+        self.assertIsNotNone(td)
+        self.assertIsNotNone(td.meta)
+        running_field = '%s-timestamp' % states.RUNNING
+        success_field = '%s-timestamp' % states.SUCCESS
+        self.assertIn(running_field, td.meta)
+        self.assertIn(success_field, td.meta)
+        td_duration = td.meta[success_field] - td.meta[running_field]
+        self.assertGreaterEqual(0.1, td_duration)
+        fd_meta = engine.storage._flowdetail.meta
+        self.assertIn(running_field, fd_meta)
+        self.assertIn(success_field, fd_meta)
+        fd_duration = fd_meta[success_field] - fd_meta[running_field]
+        self.assertGreaterEqual(0.1, fd_duration)
+
+
+class TestCapturingListeners(test.TestCase, EngineMakerMixin):
+    def test_basic_do_not_capture(self):
+        flow = lf.Flow("test")
+        flow.add(test_utils.ProgressingTask("task1"))
+        e = self._make_engine(flow)
+        with test_utils.CaptureListener(e, capture_task=False) as capturer:
+            e.run()
+        expected = ['test.f RUNNING',
+                    'test.f SUCCESS']
+        self.assertEqual(expected, capturer.values)
 
 
 class TestLoggingListeners(test.TestCase, EngineMakerMixin):
