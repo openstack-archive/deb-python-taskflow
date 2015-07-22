@@ -72,6 +72,15 @@ def _format_shared(obj, indent):
     return lines
 
 
+def _is_all_none(arg, *args):
+    if arg is not None:
+        return False
+    for more_arg in args:
+        if more_arg is not None:
+            return False
+    return True
+
+
 def _copy_function(deep_copy):
     if deep_copy:
         return copy.deepcopy
