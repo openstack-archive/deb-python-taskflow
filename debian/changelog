@@ -3,6 +3,9 @@ python-taskflow (1.17.0-1) experimental; urgency=medium
   * New upstream release.
   * Fixed (build-)depends for this release.
   * Disabled unit test patch.
+  * Black list a unit test:
+    taskflow.tests.test_examples.ExamplesTestCase.test_99_bottles
+    See LP bug: https://bugs.launchpad.net/taskflow/+bug/1479958
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 30 Jul 2015 15:21:31 +0000
 
