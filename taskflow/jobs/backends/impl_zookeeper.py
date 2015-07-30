@@ -14,7 +14,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import collections
 import contextlib
 import functools
 import sys
@@ -41,6 +40,7 @@ from taskflow.utils import misc
 LOG = logging.getLogger(__name__)
 
 
+@functools.total_ordering
 class ZookeeperJob(base.Job):
     """A zookeeper job."""
 
@@ -171,81 +171,21 @@ class ZookeeperJob(base.Job):
         return states.CLAIMED
 
     def __lt__(self, other):
+        if not isinstance(other, ZookeeperJob):
+            return NotImplemented
         if self.root == other.root:
             return self.sequence < other.sequence
         else:
             return self.root < other.root
 
+    def __eq__(self, other):
+        if not isinstance(other, ZookeeperJob):
+            return NotImplemented
+        return ((self.root, self.sequence) ==
+                (other.root, other.sequence))
+
     def __hash__(self):
         return hash(self.path)
-
-
-class ZookeeperJobBoardIterator(six.Iterator):
-    """Iterator over a zookeeper jobboard that iterates over potential jobs.
-
-    It supports the following attributes/constructor arguments:
-
-    * ``ensure_fresh``: boolean that requests that during every fetch of a new
-      set of jobs this will cause the iterator to force the backend to
-      refresh (ensuring that the jobboard has the most recent job listings).
-    * ``only_unclaimed``: boolean that indicates whether to only iterate
-      over unclaimed jobs.
-    """
-
-    _UNCLAIMED_JOB_STATES = (
-        states.UNCLAIMED,
-    )
-
-    _JOB_STATES = (
-        states.UNCLAIMED,
-        states.COMPLETE,
-        states.CLAIMED,
-    )
-
-    def __init__(self, board, only_unclaimed=False, ensure_fresh=False):
-        self._board = board
-        self._jobs = collections.deque()
-        self._fetched = False
-        self.ensure_fresh = ensure_fresh
-        self.only_unclaimed = only_unclaimed
-
-    @property
-    def board(self):
-        """The board this iterator was created from."""
-        return self._board
-
-    def __iter__(self):
-        return self
-
-    def _next_job(self):
-        if self.only_unclaimed:
-            allowed_states = self._UNCLAIMED_JOB_STATES
-        else:
-            allowed_states = self._JOB_STATES
-        job = None
-        while self._jobs and job is None:
-            maybe_job = self._jobs.popleft()
-            try:
-                if maybe_job.state in allowed_states:
-                    job = maybe_job
-            except excp.JobFailure:
-                LOG.warn("Failed determining the state of job: %s (%s)",
-                         maybe_job.uuid, maybe_job.path, exc_info=True)
-            except excp.NotFound:
-                self._board._remove_job(maybe_job.path)
-        return job
-
-    def __next__(self):
-        if not self._jobs:
-            if not self._fetched:
-                jobs = self._board._fetch_jobs(ensure_fresh=self.ensure_fresh)
-                self._jobs.extend(jobs)
-                self._fetched = True
-        job = self._next_job()
-        if job is None:
-            raise StopIteration
-        else:
-            return job
 
 
 class ZookeeperJobBoard(base.NotifyingJobBoard):
@@ -272,6 +212,16 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
     released (either manually by using :meth:`.abandon` or automatically by
     zookeeper when the ephemeral node and associated session is deemed to
     have been lost).
+
+    Do note that the creation of a kazoo client is achieved
+    by :py:func:`~taskflow.utils.kazoo_utils.make_client` and the transfer
+    of this jobboard configuration to that function to make a
+    client may happen at ``__init__`` time. This implies that certain
+    parameters from this jobboard configuration may be provided to
+    :py:func:`~taskflow.utils.kazoo_utils.make_client` such
+    that if a client was not provided by the caller one will be created
+    according to :py:func:`~taskflow.utils.kazoo_utils.make_client`'s
+    specification
 
     .. _zookeeper: http://zookeeper.apache.org/
     .. _json: http://json.org/
@@ -378,9 +328,10 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
             self._on_job_posting(children, delayed=False)
 
     def iterjobs(self, only_unclaimed=False, ensure_fresh=False):
-        return ZookeeperJobBoardIterator(self,
-                                         only_unclaimed=only_unclaimed,
-                                         ensure_fresh=ensure_fresh)
+        return base.JobBoardIterator(
+            self, LOG, only_unclaimed=only_unclaimed,
+            ensure_fresh=ensure_fresh, board_fetch_func=self._fetch_jobs,
+            board_removal_func=lambda a_job: self._remove_job(a_job.path))
 
     def _remove_job(self, path):
         if path not in self._known_jobs:
@@ -688,10 +639,12 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
                     # must recalculate the amount of time we really have left.
                     self._job_cond.wait(watch.leftover(return_none=True))
                 else:
-                    it = ZookeeperJobBoardIterator(self)
-                    it._jobs.extend(self._fetch_jobs())
-                    it._fetched = True
-                    return it
+                    curr_jobs = self._fetch_jobs()
+                    fetch_func = lambda ensure_fresh: curr_jobs
+                    removal_func = lambda a_job: self._remove_job(a_job.path)
+                    return base.JobBoardIterator(
+                        self, LOG, board_fetch_func=fetch_func,
+                        board_removal_func=removal_func)
 
     @property
     def connected(self):

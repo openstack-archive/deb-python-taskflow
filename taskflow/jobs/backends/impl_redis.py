@@ -16,6 +16,7 @@
 
 import contextlib
 import datetime
+import functools
 import string
 import threading
 import time
@@ -58,6 +59,7 @@ def _translate_failures():
                              " internal error")
 
 
+@functools.total_ordering
 class RedisJob(base.Job):
     """A redis job."""
 
@@ -126,10 +128,24 @@ class RedisJob(base.Job):
                                    prior_version=self._redis_version)
 
     def __lt__(self, other):
-        if self.created_on == other.created_on:
-            return self.sequence < other.sequence
+        if not isinstance(other, RedisJob):
+            return NotImplemented
+        if self.board.listings_key == other.board.listings_key:
+            if self.created_on == other.created_on:
+                return self.sequence < other.sequence
+            else:
+                return self.created_on < other.created_on
         else:
-            return self.created_on < other.created_on
+            return self.board.listings_key < other.board.listings_key
+
+    def __eq__(self, other):
+        if not isinstance(other, RedisJob):
+            return NotImplemented
+        return ((self.board.listings_key, self.created_on, self.sequence) ==
+                (other.board.listings_key, other.created_on, other.sequence))
+
+    def __hash__(self):
+        return hash((self.board.listings_key, self.created_on, self.sequence))
 
     @property
     def created_on(self):
@@ -753,22 +769,24 @@ return cmsgpack.pack(result)
         while True:
             jc = self.job_count
             if jc > 0:
-                it = self.iterjobs()
-                return it
+                curr_jobs = self._fetch_jobs()
+                if curr_jobs:
+                    return base.JobBoardIterator(
+                        self, LOG,
+                        board_fetch_func=lambda ensure_fresh: curr_jobs)
+            if w.expired():
+                raise exc.NotFound("Expired waiting for jobs to"
+                                   " arrive; waited %s seconds"
+                                   % w.elapsed())
             else:
-                if w.expired():
-                    raise exc.NotFound("Expired waiting for jobs to"
-                                       " arrive; waited %s seconds"
-                                       % w.elapsed())
+                remaining = w.leftover(return_none=True)
+                if remaining is not None:
+                    delay = min(delay * 2, remaining, max_delay)
                 else:
-                    remaining = w.leftover(return_none=True)
-                    if remaining is not None:
-                        delay = min(delay * 2, remaining, max_delay)
-                    else:
-                        delay = min(delay * 2, max_delay)
-                    sleep_func(delay)
+                    delay = min(delay * 2, max_delay)
+                sleep_func(delay)
 
-    def iterjobs(self, only_unclaimed=False, ensure_fresh=False):
+    def _fetch_jobs(self):
         with _translate_failures():
             raw_postings = self._client.hgetall(self.listings_key)
         postings = []
@@ -782,13 +800,13 @@ return cmsgpack.pack(result)
                            book_data=posting.get('book'),
                            backend=self._persistence)
             postings.append(job)
-        postings = sorted(postings)
-        for job in postings:
-            if only_unclaimed:
-                if job.state == states.UNCLAIMED:
-                    yield job
-            else:
-                yield job
+        return sorted(postings)
+
+    def iterjobs(self, only_unclaimed=False, ensure_fresh=False):
+        return base.JobBoardIterator(
+            self, LOG, only_unclaimed=only_unclaimed,
+            ensure_fresh=ensure_fresh,
+            board_fetch_func=lambda ensure_fresh: self._fetch_jobs())
 
     @base.check_who
     def consume(self, job, who):

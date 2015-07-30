@@ -21,17 +21,35 @@ import six
 from taskflow import states
 
 
-#: Sentinel use to represent no-result (none can be a valid result...)
-NO_RESULT = object()
-
-#: States that are expected to/may have a result to save...
-SAVE_RESULT_STATES = (states.SUCCESS, states.FAILURE)
-
-
 @six.add_metaclass(abc.ABCMeta)
 class Action(object):
     """An action that handles executing, state changes, ... of atoms."""
 
+    NO_RESULT = object()
+    """
+    Sentinel use to represent lack of any result (none can be a valid result)
+    """
+
+    #: States that are expected to have a result to save...
+    SAVE_RESULT_STATES = (states.SUCCESS, states.FAILURE,
+                          states.REVERTED, states.REVERT_FAILURE)
+
     def __init__(self, storage, notifier):
         self._storage = storage
         self._notifier = notifier
+
+    @abc.abstractmethod
+    def schedule_execution(self, atom):
+        """Schedules atom execution."""
+
+    @abc.abstractmethod
+    def schedule_reversion(self, atom):
+        """Schedules atom reversion."""
+
+    @abc.abstractmethod
+    def complete_reversion(self, atom, result):
+        """Completes atom reversion."""
+
+    @abc.abstractmethod
+    def complete_execution(self, atom, result):
+        """Completes atom execution."""

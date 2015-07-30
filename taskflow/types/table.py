@@ -17,7 +17,15 @@
 import itertools
 import os
 
+from debtcollector import removals
 import six
+
+# TODO(harlowja): remove me in a future version, since the futurist
+# is the replacement for this whole module...
+removals.removed_module(__name__,
+                        replacement="the 'prettytable' library",
+                        version="1.16", removal_version='2.0',
+                        stacklevel=4)
 
 
 class PleasantTable(object):

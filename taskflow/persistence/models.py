@@ -17,6 +17,7 @@
 
 import abc
 import copy
+import os
 
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
@@ -26,11 +27,50 @@ from taskflow import exceptions as exc
 from taskflow import logging
 from taskflow import states
 from taskflow.types import failure as ft
+from taskflow.utils import misc
 
 LOG = logging.getLogger(__name__)
 
 
 # Internal helpers...
+
+
+def _format_meta(metadata, indent):
+    """Format the common metadata dictionary in the same manner."""
+    if not metadata:
+        return []
+    lines = [
+        '%s- metadata:' % (" " * indent),
+    ]
+    for (k, v) in metadata.items():
+        # Progress for now is a special snowflake and will be formatted
+        # in percent format.
+        if k == 'progress' and isinstance(v, misc.NUMERIC_TYPES):
+            v = "%0.2f%%" % (v * 100.0)
+        lines.append("%s+ %s = %s" % (" " * (indent + 2), k, v))
+    return lines
+
+
+def _format_shared(obj, indent):
+    """Format the common shared attributes in the same manner."""
+    if obj is None:
+        return []
+    lines = []
+    for attr_name in ("uuid", "state"):
+        if not hasattr(obj, attr_name):
+            continue
+        lines.append("%s- %s = %s" % (" " * indent, attr_name,
+                                      getattr(obj, attr_name)))
+    return lines
+
+
+def _is_all_none(arg, *args):
+    if arg is not None:
+        return False
+    for more_arg in args:
+        if more_arg is not None:
+            return False
+    return True
 
 
 def _copy_function(deep_copy):
@@ -95,6 +135,33 @@ class LogBook(object):
         self.created_at = timeutils.utcnow()
         self.updated_at = None
         self.meta = {}
+
+    def pformat(self, indent=0, linesep=os.linesep):
+        """Pretty formats this logbook into a string.
+
+        >>> from taskflow.persistence import models
+        >>> tmp = models.LogBook("example")
+        >>> print(tmp.pformat())
+        LogBook: 'example'
+         - uuid = ...
+         - created_at = ...
+        """
+        cls_name = self.__class__.__name__
+        lines = ["%s%s: '%s'" % (" " * indent, cls_name, self.name)]
+        lines.extend(_format_shared(self, indent=indent + 1))
+        lines.extend(_format_meta(self.meta, indent=indent + 1))
+        if self.created_at is not None:
+            lines.append("%s- created_at = %s"
+                         % (" " * (indent + 1),
+                            timeutils.isotime(self.created_at)))
+        if self.updated_at is not None:
+            lines.append("%s- updated_at = %s"
+                         % (" " * (indent + 1),
+                            timeutils.isotime(self.updated_at)))
+        for flow_detail in self:
+            lines.append(flow_detail.pformat(indent=indent + 1,
+                                             linesep=linesep))
+        return linesep.join(lines)
 
     def add(self, fd):
         """Adds a new flow detail into this logbook.
@@ -267,6 +334,27 @@ class FlowDetail(object):
         self.meta = fd.meta
         return self
 
+    def pformat(self, indent=0, linesep=os.linesep):
+        """Pretty formats this flow detail into a string.
+
+        >>> from oslo_utils import uuidutils
+        >>> from taskflow.persistence import models
+        >>> flow_detail = models.FlowDetail("example",
+        ...                                 uuid=uuidutils.generate_uuid())
+        >>> print(flow_detail.pformat())
+        FlowDetail: 'example'
+         - uuid = ...
+         - state = ...
+        """
+        cls_name = self.__class__.__name__
+        lines = ["%s%s: '%s'" % (" " * indent, cls_name, self.name)]
+        lines.extend(_format_shared(self, indent=indent + 1))
+        lines.extend(_format_meta(self.meta, indent=indent + 1))
+        for atom_detail in self:
+            lines.append(atom_detail.pformat(indent=indent + 1,
+                                             linesep=linesep))
+        return linesep.join(lines)
+
     def merge(self, fd, deep_copy=False):
         """Merges the current object state with the given one's state.
 
@@ -413,11 +501,18 @@ class AtomDetail(object):
                    strategies).
     :ivar results: Any results the atom produced from either its
                    ``execute`` method or from other sources.
-    :ivar failure: If the atom failed (possibly due to its ``execute``
-                   method raising) this will be a
+    :ivar revert_results: Any results the atom produced from either its
+                          ``revert`` method or from other sources.
+    :ivar failure: If the atom failed (due to its ``execute`` method
+                   raising) this will be a
                    :py:class:`~taskflow.types.failure.Failure` object that
                    represents that failure (if there was no failure this
                    will be set to none).
+    :ivar revert_failure: If the atom failed (possibly due to its ``revert``
+                          method raising) this will be a
+                          :py:class:`~taskflow.types.failure.Failure` object
+                          that represents that failure (if there was no
+                          failure this will be set to none).
     """
 
     def __init__(self, name, uuid):
@@ -427,6 +522,8 @@ class AtomDetail(object):
         self.intention = states.EXECUTE
         self.results = None
         self.failure = None
+        self.revert_results = None
+        self.revert_failure = None
         self.meta = {}
         self.version = None
 
@@ -465,6 +562,8 @@ class AtomDetail(object):
         self.meta = ad.meta
         self.failure = ad.failure
         self.results = ad.results
+        self.revert_results = ad.revert_results
+        self.revert_failure = ad.revert_failure
         self.version = ad.version
         return self
 
@@ -503,6 +602,16 @@ class AtomDetail(object):
                     self.failure = other.failure
             else:
                 self.failure = None
+        if self.revert_failure != other.revert_failure:
+            # NOTE(imelnikov): we can't just deep copy Failures, as they
+            # contain tracebacks, which are not copyable.
+            if other.revert_failure:
+                if deep_copy:
+                    self.revert_failure = other.revert_failure.copy()
+                else:
+                    self.revert_failure = other.revert_failure
+            else:
+                self.revert_failure = None
         if self.meta != other.meta:
             self.meta = copy_fn(other.meta)
         if self.version != other.version:
@@ -522,11 +631,17 @@ class AtomDetail(object):
             failure = self.failure.to_dict()
         else:
             failure = None
+        if self.revert_failure:
+            revert_failure = self.revert_failure.to_dict()
+        else:
+            revert_failure = None
         return {
             'failure': failure,
+            'revert_failure': revert_failure,
             'meta': self.meta,
             'name': self.name,
             'results': self.results,
+            'revert_results': self.revert_results,
             'state': self.state,
             'version': self.version,
             'intention': self.intention,
@@ -547,11 +662,15 @@ class AtomDetail(object):
         obj.state = data.get('state')
         obj.intention = data.get('intention')
         obj.results = data.get('results')
+        obj.revert_results = data.get('revert_results')
         obj.version = data.get('version')
         obj.meta = _fix_meta(data)
         failure = data.get('failure')
         if failure:
             obj.failure = ft.Failure.from_dict(failure)
+        revert_failure = data.get('revert_failure')
+        if revert_failure:
+            obj.revert_failure = ft.Failure.from_dict(revert_failure)
         return obj
 
     @property
@@ -572,6 +691,20 @@ class AtomDetail(object):
     def copy(self):
         """Copies this atom detail."""
 
+    def pformat(self, indent=0, linesep=os.linesep):
+        """Pretty formats this atom detail into a string."""
+        cls_name = self.__class__.__name__
+        lines = ["%s%s: '%s'" % (" " * (indent), cls_name, self.name)]
+        lines.extend(_format_shared(self, indent=indent + 1))
+        lines.append("%s- version = %s"
+                     % (" " * (indent + 1), misc.get_version_string(self)))
+        lines.append("%s- results = %s"
+                     % (" " * (indent + 1), self.results))
+        lines.append("%s- failure = %s" % (" " * (indent + 1),
+                                           bool(self.failure)))
+        lines.extend(_format_meta(self.meta, indent=indent + 1))
+        return linesep.join(lines)
+
 
 class TaskDetail(AtomDetail):
     """A task detail (an atom detail typically associated with a |tt| atom).
@@ -582,47 +715,65 @@ class TaskDetail(AtomDetail):
     def reset(self, state):
         """Resets this task detail and sets ``state`` attribute value.
 
-        This sets any previously set ``results`` and ``failure`` attributes
-        back to ``None`` and sets the state to the provided one, as well as
-        setting this task details ``intention`` attribute to ``EXECUTE``.
+        This sets any previously set ``results``, ``failure``,
+        and ``revert_results`` attributes back to ``None`` and sets the
+        state to the provided one, as well as setting this task
+        details ``intention`` attribute to ``EXECUTE``.
         """
         self.results = None
         self.failure = None
+        self.revert_results = None
+        self.revert_failure = None
         self.state = state
         self.intention = states.EXECUTE
 
     def put(self, state, result):
         """Puts a result (acquired in the given state) into this detail.
 
-        If the result is a :py:class:`~taskflow.types.failure.Failure` object
-        then the ``failure`` attribute will be set (and the ``results``
-        attribute will be set to ``None``); if the result is not a
-        :py:class:`~taskflow.types.failure.Failure` object then the
-        ``results`` attribute will be set (and the ``failure`` attribute
-        will be set to ``None``). In either case the ``state``
-        attribute will be set to the provided state.
+        Returns whether this object was modified (or whether it was not).
         """
         was_altered = False
-        if self.state != state:
+        if state != self.state:
             self.state = state
             was_altered = True
-        if self._was_failure(state, result):
+        if state == states.REVERT_FAILURE:
+            if self.revert_failure != result:
+                self.revert_failure = result
+                was_altered = True
+            if not _is_all_none(self.results, self.revert_results):
+                self.results = None
+                self.revert_results = None
+                was_altered = True
+        elif state == states.FAILURE:
             if self.failure != result:
                 self.failure = result
                 was_altered = True
-            if self.results is not None:
+            if not _is_all_none(self.results, self.revert_results,
+                                self.revert_failure):
                 self.results = None
+                self.revert_results = None
+                self.revert_failure = None
                 was_altered = True
-        else:
+        elif state == states.SUCCESS:
+            if not _is_all_none(self.revert_results, self.revert_failure,
+                                self.failure):
+                self.revert_results = None
+                self.revert_failure = None
+                self.failure = None
+                was_altered = True
             # We don't really have the ability to determine equality of
             # task (user) results at the current time, without making
             # potentially bad guesses, so assume the task detail always needs
             # to be saved if they are not exactly equivalent...
-            if self.results is not result:
+            if result is not self.results:
                 self.results = result
                 was_altered = True
-            if self.failure is not None:
-                self.failure = None
+        elif state == states.REVERTED:
+            if not _is_all_none(self.revert_failure):
+                self.revert_failure = None
+                was_altered = True
+            if result is not self.revert_results:
+                self.revert_results = result
                 was_altered = True
         return was_altered
 
@@ -630,10 +781,11 @@ class TaskDetail(AtomDetail):
         """Merges the current task detail with the given one.
 
         NOTE(harlowja): This merge does **not** copy and replace
-        the ``results`` attribute if it differs. Instead the current
-        objects ``results`` attribute directly becomes (via assignment) the
-        other objects ``results`` attribute. Also note that if the provided
-        object is this object itself then **no** merging is done.
+        the ``results`` or ``revert_results`` if it differs. Instead the
+        current objects ``results`` and ``revert_results`` attributes directly
+        becomes (via assignment) the other objects attributes. Also note that
+        if the provided object is this object itself then **no** merging is
+        done.
 
         See: https://bugs.launchpad.net/taskflow/+bug/1452978 for
         what happens if this is copied at a deeper level (for example by
@@ -648,8 +800,8 @@ class TaskDetail(AtomDetail):
         if other is self:
             return self
         super(TaskDetail, self).merge(other, deep_copy=deep_copy)
-        if self.results != other.results:
-            self.results = other.results
+        self.results = other.results
+        self.revert_results = other.revert_results
         return self
 
     def copy(self):
@@ -659,10 +811,10 @@ class TaskDetail(AtomDetail):
         version information that this object maintains is shallow
         copied via ``copy.copy``).
 
-        NOTE(harlowja): This copy does **not** perform ``copy.copy`` on
-        the ``results`` attribute of this object (before assigning to the
-        copy). Instead the current objects ``results`` attribute directly
-        becomes (via assignment) the copied objects ``results`` attribute.
+        NOTE(harlowja): This copy does **not** copy and replace
+        the ``results`` or ``revert_results`` attribute if it differs. Instead
+        the current objects ``results`` and ``revert_results`` attributes
+        directly becomes (via assignment) the cloned objects attributes.
 
         See: https://bugs.launchpad.net/taskflow/+bug/1452978 for
         what happens if this is copied at a deeper level (for example by
@@ -673,6 +825,7 @@ class TaskDetail(AtomDetail):
         """
         clone = copy.copy(self)
         clone.results = self.results
+        clone.revert_results = self.revert_results
         if self.meta:
             clone.meta = self.meta.copy()
         if self.version:
@@ -694,12 +847,15 @@ class RetryDetail(AtomDetail):
         """Resets this retry detail and sets ``state`` attribute value.
 
         This sets any previously added ``results`` back to an empty list
-        and resets the ``failure`` attribute back to ``None`` and sets the
-        state to the provided one, as well as setting this atom
+        and resets the ``failure`` and ``revert_failure`` and
+        ``revert_results`` attributes back to ``None`` and sets the state
+        to the provided one, as well as setting this retry
         details ``intention`` attribute to ``EXECUTE``.
         """
         self.results = []
+        self.revert_results = None
         self.failure = None
+        self.revert_failure = None
         self.state = state
         self.intention = states.EXECUTE
 
@@ -711,14 +867,15 @@ class RetryDetail(AtomDetail):
         copied via ``copy.copy``).
 
         NOTE(harlowja): This copy does **not** copy
-        the incoming objects ``results`` attribute. Instead this
-        objects ``results`` attribute list is iterated over and a new list
-        is constructed with each ``(data, failures)`` element in that list
-        having its ``failures`` (a dictionary of each named
+        the incoming objects ``results`` or ``revert_results`` attributes.
+        Instead this objects ``results`` attribute list is iterated over and
+        a new list is constructed with each ``(data, failures)`` element in
+        that list having its ``failures`` (a dictionary of each named
         :py:class:`~taskflow.types.failure.Failure` object that
         occured) copied but its ``data`` is left untouched. After
         this is done that new list becomes (via assignment) the cloned
-        objects ``results`` attribute.
+        objects ``results`` attribute. The ``revert_results`` is directly
+        assigned to the cloned objects ``revert_results`` attribute.
 
         See: https://bugs.launchpad.net/taskflow/+bug/1452978 for
         what happens if the ``data`` in ``results`` is copied at a
@@ -738,6 +895,7 @@ class RetryDetail(AtomDetail):
                 copied_failures[key] = failure
             results.append((data, copied_failures))
         clone.results = results
+        clone.revert_results = self.revert_results
         if self.meta:
             clone.meta = self.meta.copy()
         if self.version:
@@ -771,21 +929,50 @@ class RetryDetail(AtomDetail):
     def put(self, state, result):
         """Puts a result (acquired in the given state) into this detail.
 
-        If the result is a :py:class:`~taskflow.types.failure.Failure` object
-        then the ``failure`` attribute will be set; if the result is not a
-        :py:class:`~taskflow.types.failure.Failure` object then the
-        ``results`` attribute will be appended to (and the ``failure``
-        attribute will be set to ``None``). In either case the ``state``
-        attribute will be set to the provided state.
+        Returns whether this object was modified (or whether it was not).
         """
         # Do not clean retry history (only on reset does this happen).
-        self.state = state
-        if self._was_failure(state, result):
-            self.failure = result
-        else:
+        was_altered = False
+        if state != self.state:
+            self.state = state
+            was_altered = True
+        if state == states.REVERT_FAILURE:
+            if result != self.revert_failure:
+                self.revert_failure = result
+                was_altered = True
+            if not _is_all_none(self.revert_results):
+                self.revert_results = None
+                was_altered = True
+        elif state == states.FAILURE:
+            if result != self.failure:
+                self.failure = result
+                was_altered = True
+            if not _is_all_none(self.revert_results, self.revert_failure):
+                self.revert_results = None
+                self.revert_failure = None
+                was_altered = True
+        elif state == states.SUCCESS:
+            if not _is_all_none(self.failure, self.revert_failure,
+                                self.revert_results):
+                self.failure = None
+                self.revert_failure = None
+                self.revert_results = None
+            # Track what we produced, so that we can examine it (or avoid
+            # using it again).
             self.results.append((result, {}))
-            self.failure = None
-        return True
+            was_altered = True
+        elif state == states.REVERTED:
+            # We don't really have the ability to determine equality of
+            # task (user) results at the current time, without making
+            # potentially bad guesses, so assume the retry detail always needs
+            # to be saved if they are not exactly equivalent...
+            if result is not self.revert_results:
+                self.revert_results = result
+                was_altered = True
+            if not _is_all_none(self.revert_failure):
+                self.revert_failure = None
+                was_altered = True
+        return was_altered
 
     @classmethod
     def from_dict(cls, data):

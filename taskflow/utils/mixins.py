@@ -14,18 +14,22 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from debtcollector import moves
-from debtcollector import removals
+import six
 
-from taskflow.conductors.backends import impl_blocking
 
-# TODO(harlowja): remove this module soon...
-removals.removed_module(__name__,
-                        replacement="the conductor entrypoints",
-                        version="0.8", removal_version="2.0",
-                        stacklevel=4)
+class StrMixin(object):
+    """Mixin that helps deal with the PY2 and PY3 method differences.
 
-# TODO(harlowja): remove this proxy/legacy class soon...
-SingleThreadedConductor = moves.moved_class(
-    impl_blocking.BlockingConductor, 'SingleThreadedConductor',
-    __name__, version="0.8", removal_version="2.0")
+    http://lucumr.pocoo.org/2011/1/22/forwards-compatible-python/ explains
+    why this is quite useful...
+    """
+
+    if six.PY2:
+        def __str__(self):
+            try:
+                return self.__bytes__()
+            except AttributeError:
+                return self.__unicode__().encode('utf-8')
+    else:
+        def __str__(self):
+            return self.__unicode__()

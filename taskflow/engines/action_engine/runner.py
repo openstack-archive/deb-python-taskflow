@@ -14,10 +14,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+
+from automaton import machines
+from automaton import runners
+
 from taskflow import logging
 from taskflow import states as st
 from taskflow.types import failure
-from taskflow.types import fsm
 
 # Waiting state timeout (in seconds).
 _WAITING_TIMEOUT = 60
@@ -114,7 +117,6 @@ class Runner(object):
 
         # Cache some local functions/methods...
         do_schedule = self._scheduler.schedule
-        wait_for_any = self._waiter.wait_for_any
         do_complete = self._completer.complete
 
         def iter_next_nodes(target_node=None):
@@ -168,7 +170,7 @@ class Runner(object):
             # call sometime in the future, or equivalent that will work in
             # py2 and py3.
             if memory.not_done:
-                done, not_done = wait_for_any(memory.not_done, timeout)
+                done, not_done = self._waiter(memory.not_done, timeout=timeout)
                 memory.done.update(done)
                 memory.not_done = not_done
             return _ANALYZE
@@ -236,7 +238,7 @@ class Runner(object):
             watchers['on_exit'] = on_exit
             watchers['on_enter'] = on_enter
 
-        m = fsm.FSM(_UNDEFINED)
+        m = machines.FiniteMachine()
         m.add_state(_GAME_OVER, **watchers)
         m.add_state(_UNDEFINED, **watchers)
         m.add_state(st.ANALYZING, **watchers)
@@ -247,6 +249,7 @@ class Runner(object):
         m.add_state(st.SUSPENDED, terminal=True, **watchers)
         m.add_state(st.WAITING, **watchers)
         m.add_state(st.FAILURE, terminal=True, **watchers)
+        m.default_start_state = _UNDEFINED
 
         m.add_transition(_GAME_OVER, st.REVERTED, _REVERTED)
         m.add_transition(_GAME_OVER, st.SUCCESS, _SUCCESS)
@@ -267,12 +270,14 @@ class Runner(object):
         m.add_reaction(st.WAITING, _WAIT, wait)
 
         m.freeze()
-        return (m, memory)
+
+        r = runners.FiniteRunner(m)
+        return (m, r, memory)
 
     def run_iter(self, timeout=None):
         """Runs iteratively using a locally built state machine."""
-        machine, memory = self.build(timeout=timeout)
-        for (_prior_state, new_state) in machine.run_iter(_START):
+        machine, runner, memory = self.build(timeout=timeout)
+        for (_prior_state, new_state) in runner.run_iter(_START):
             # NOTE(harlowja): skip over meta-states.
             if new_state not in _META_STATES:
                 if new_state == st.FAILURE:

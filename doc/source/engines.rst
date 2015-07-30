@@ -142,12 +142,12 @@ Serial
 
 **Engine type**: ``'serial'``
 
-Runs all tasks on a single thread -- the same thread ``engine.run()`` is
-called from.
+Runs all tasks on a single thread -- the same thread
+:py:meth:`~taskflow.engines.base.Engine.run` is called from.
 
 .. note::
 
-    This engine is used by default.
+    This engine is used by **default**.
 
 .. tip::
 
@@ -193,14 +193,7 @@ Workers
 
 .. note:: Since this engine is significantly more complicated (and
           different) then the others we thought it appropriate to devote a
-          whole documentation section to it.
-
-For further information, please refer to the the following:
-
-.. toctree::
-   :maxdepth: 2
-
-   workers
+          whole documentation :doc:`section <workers>` to it.
 
 How they run
 ============

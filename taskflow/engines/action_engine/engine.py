@@ -16,6 +16,7 @@
 
 import collections
 import contextlib
+import itertools
 import threading
 
 from concurrent import futures
@@ -40,13 +41,17 @@ LOG = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
-def _start_stop(executor):
-    # A teenie helper context manager to safely start/stop a executor...
-    executor.start()
+def _start_stop(task_executor, retry_executor):
+    # A teenie helper context manager to safely start/stop engine executors...
+    task_executor.start()
     try:
-        yield executor
+        retry_executor.start()
+        try:
+            yield (task_executor, retry_executor)
+        finally:
+            retry_executor.stop()
     finally:
-        executor.stop()
+        task_executor.stop()
 
 
 class ActionEngine(base.Engine):
@@ -64,7 +69,6 @@ class ActionEngine(base.Engine):
     valid states in the states module to learn more about what other states
     the tasks and flow being ran can go through.
     """
-    _compiler_factory = compiler.PatternCompiler
 
     NO_RERAISING_STATES = frozenset([states.SUSPENDED, states.SUCCESS])
     """
@@ -78,9 +82,13 @@ class ActionEngine(base.Engine):
         self._runtime = None
         self._compiled = False
         self._compilation = None
+        self._compiler = compiler.PatternCompiler(flow)
         self._lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._storage_ensured = False
+        # Retries are not *currently* executed out of the engines process
+        # or thread (this could change in the future if we desire it to).
+        self._retry_executor = executor.SerialRetryExecutor()
 
     def _check(self, name, check_compiled, check_storage_ensured):
         """Check (and raise) if the engine has not reached a certain stage."""
@@ -166,7 +174,7 @@ class ActionEngine(base.Engine):
         self.validate()
         runner = self._runtime.runner
         last_state = None
-        with _start_stop(self._task_executor):
+        with _start_stop(self._task_executor, self._retry_executor):
             self._change_state(states.RUNNING)
             try:
                 closed = False
@@ -194,8 +202,10 @@ class ActionEngine(base.Engine):
                 if last_state and last_state not in ignorable_states:
                     self._change_state(last_state)
                     if last_state not in self.NO_RERAISING_STATES:
-                        failures = self.storage.get_failures()
-                        failure.Failure.reraise_if_any(failures.values())
+                        it = itertools.chain(
+                            six.itervalues(self.storage.get_failures()),
+                            six.itervalues(self.storage.get_revert_failures()))
+                        failure.Failure.reraise_if_any(it)
 
     def _change_state(self, state):
         with self._state_lock:
@@ -280,12 +290,19 @@ class ActionEngine(base.Engine):
             self._storage_ensured = True
         # Reset everything back to pending (if we were previously reverted).
         if self.storage.get_flow_state() == states.REVERTED:
-            self._runtime.reset_all()
-            self._change_state(states.PENDING)
+            self.reset()
 
-    @misc.cachedproperty
-    def _compiler(self):
-        return self._compiler_factory(self._flow)
+    @fasteners.locked
+    def reset(self):
+        if not self._storage_ensured:
+            raise exc.InvalidState("Can not reset an engine"
+                                   " which has not has its storage"
+                                   " populated")
+        # This transitions *all* contained atoms back into the PENDING state
+        # with an intention to EXECUTE (or dies trying to do that) and then
+        # changes the state of the flow to PENDING so that it can then run...
+        self._runtime.reset_all()
+        self._change_state(states.PENDING)
 
     @fasteners.locked
     def compile(self):
@@ -295,7 +312,8 @@ class ActionEngine(base.Engine):
         self._runtime = runtime.Runtime(self._compilation,
                                         self.storage,
                                         self.atom_notifier,
-                                        self._task_executor)
+                                        self._task_executor,
+                                        self._retry_executor)
         self._runtime.compile()
         self._compiled = True
 

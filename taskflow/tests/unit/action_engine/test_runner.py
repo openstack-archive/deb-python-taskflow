@@ -14,19 +14,18 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from automaton import exceptions as excp
 import six
 
 from taskflow.engines.action_engine import compiler
 from taskflow.engines.action_engine import executor
 from taskflow.engines.action_engine import runner
 from taskflow.engines.action_engine import runtime
-from taskflow import exceptions as excp
 from taskflow.patterns import linear_flow as lf
 from taskflow import states as st
 from taskflow import storage
 from taskflow import test
 from taskflow.tests import utils as test_utils
-from taskflow.types import fsm
 from taskflow.types import notifier
 from taskflow.utils import persistence_utils as pu
 
@@ -43,10 +42,12 @@ class _RunnerTestMixin(object):
             store.set_flow_state(initial_state)
         task_notifier = notifier.Notifier()
         task_executor = executor.SerialTaskExecutor()
+        retry_executor = executor.SerialRetryExecutor()
         task_executor.start()
         self.addCleanup(task_executor.stop)
         r = runtime.Runtime(compilation, store,
-                            task_notifier, task_executor)
+                            task_notifier, task_executor,
+                            retry_executor)
         r.compile()
         return r
 
@@ -126,7 +127,8 @@ class RunnerTest(test.TestCase, _RunnerTestMixin):
         failure = failures[0]
         self.assertTrue(failure.check(RuntimeError))
 
-        self.assertEqual(st.FAILURE, rt.storage.get_atom_state(tasks[0].name))
+        self.assertEqual(st.REVERT_FAILURE,
+                         rt.storage.get_atom_state(tasks[0].name))
 
     def test_run_iterations_suspended(self):
         flow = lf.Flow("root")
@@ -184,9 +186,9 @@ class RunnerBuildTest(test.TestCase, _RunnerTestMixin):
         flow.add(*tasks)
 
         rt = self._make_runtime(flow, initial_state=st.RUNNING)
-        machine, memory = rt.runner.build()
+        machine, machine_runner, memory = rt.runner.build()
         self.assertTrue(rt.runner.runnable())
-        self.assertRaises(fsm.NotInitialized, machine.process_event, 'poke')
+        self.assertRaises(excp.NotInitialized, machine.process_event, 'poke')
 
         # Should now be pending...
         self.assertEqual(st.PENDING, rt.storage.get_atom_state(tasks[0].name))
@@ -253,10 +255,10 @@ class RunnerBuildTest(test.TestCase, _RunnerTestMixin):
         flow.add(*tasks)
 
         rt = self._make_runtime(flow, initial_state=st.RUNNING)
-        machine, memory = rt.runner.build()
+        machine, machine_runner, memory = rt.runner.build()
         self.assertTrue(rt.runner.runnable())
 
-        transitions = list(machine.run_iter('start'))
+        transitions = list(machine_runner.run_iter('start'))
         self.assertEqual((runner._UNDEFINED, st.RESUMING), transitions[0])
         self.assertEqual((runner._GAME_OVER, st.SUCCESS), transitions[-1])
         self.assertEqual(st.SUCCESS, rt.storage.get_atom_state(tasks[0].name))
@@ -267,10 +269,10 @@ class RunnerBuildTest(test.TestCase, _RunnerTestMixin):
         flow.add(*tasks)
 
         rt = self._make_runtime(flow, initial_state=st.RUNNING)
-        machine, memory = rt.runner.build()
+        machine, machine_runner, memory = rt.runner.build()
         self.assertTrue(rt.runner.runnable())
 
-        transitions = list(machine.run_iter('start'))
+        transitions = list(machine_runner.run_iter('start'))
         self.assertEqual((runner._GAME_OVER, st.FAILURE), transitions[-1])
         self.assertEqual(1, len(memory.failures))
 
@@ -280,10 +282,10 @@ class RunnerBuildTest(test.TestCase, _RunnerTestMixin):
         flow.add(*tasks)
 
         rt = self._make_runtime(flow, initial_state=st.RUNNING)
-        machine, memory = rt.runner.build()
+        machine, machine_runner, memory = rt.runner.build()
         self.assertTrue(rt.runner.runnable())
 
-        transitions = list(machine.run_iter('start'))
+        transitions = list(machine_runner.run_iter('start'))
         self.assertEqual((runner._GAME_OVER, st.REVERTED), transitions[-1])
         self.assertEqual(st.REVERTED, rt.storage.get_atom_state(tasks[0].name))
 
@@ -294,8 +296,8 @@ class RunnerBuildTest(test.TestCase, _RunnerTestMixin):
         flow.add(*tasks)
 
         rt = self._make_runtime(flow, initial_state=st.RUNNING)
-        machine, memory = rt.runner.build()
-        transitions = list(machine.run_iter('start'))
+        machine, machine_runner, memory = rt.runner.build()
+        transitions = list(machine_runner.run_iter('start'))
 
         occurrences = dict((t, transitions.count(t)) for t in transitions)
         self.assertEqual(10, occurrences.get((st.SCHEDULING, st.WAITING)))

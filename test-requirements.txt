@@ -3,14 +3,16 @@
 # process, which may cause wedges in the gate later.
 
 hacking<0.11,>=0.10.0
-oslotest>=1.5.1 # Apache-2.0
-mock>=1.1;python_version!='2.6'
-mock==1.0.1;python_version=='2.6'
+oslotest>=1.7.0 # Apache-2.0
+mock>=1.2
 testtools>=1.4.0
 testscenarios>=0.4
 
 # Used for testing the WBE engine.
 kombu>=3.0.7
+
+# Used for doc style checking
+doc8 # Apache-2.0
 
 # Used for testing zookeeper & backends.
 zake>=0.1.6 # Apache-2.0
