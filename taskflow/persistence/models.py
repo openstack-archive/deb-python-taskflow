@@ -34,14 +34,6 @@ LOG = logging.getLogger(__name__)
 
 # Internal helpers...
 
-def _is_all_none(arg, *args):
-    if arg is not None:
-        return False
-    for more_arg in args:
-        if more_arg is not None:
-            return False
-    return True
-
 
 def _format_meta(metadata, indent):
     """Format the common metadata dictionary in the same manner."""
