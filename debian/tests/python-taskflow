@@ -1,0 +1,4 @@
+#!/bin/sh
+
+set -e -u
+testr init && testr run taskflow.tests.unit.test_storage

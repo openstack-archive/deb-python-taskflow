@@ -1,3 +1,9 @@
+python-taskflow (1.17.0-2) experimental; urgency=medium
+
+  * Applied what's remaining as usefull in the Ubuntu patch (Closes: #791930).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 08 Sep 2015 13:49:30 +0200
+
 python-taskflow (1.17.0-1) experimental; urgency=medium
 
   * New upstream release.
