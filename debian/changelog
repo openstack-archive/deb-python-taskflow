@@ -3,6 +3,7 @@ python-taskflow (1.17.0-3) experimental; urgency=medium
   * Added Python3 support (Closes: #798018).
   * Added a -doc package.
   * Fixed compat level.
+  * Fixed wrong watch file URL (moved upstream).
 
  -- Thomas Goirand <zigo@debian.org>  Sat, 12 Sep 2015 07:56:16 +0000
 

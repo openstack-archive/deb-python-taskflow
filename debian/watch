@@ -1,3 +1,3 @@
 version=3
 opts=filenamemangle=s/.+\/v?(\d\S*)\.tar\.gz/taskflow-$1\.tar\.gz/ \
-  https://github.com/stackforge/taskflow/tags .*/v?(\d\S*)\.tar\.gz
+  https://github.com/openstack/taskflow/tags .*/v?(\d\S*)\.tar\.gz
