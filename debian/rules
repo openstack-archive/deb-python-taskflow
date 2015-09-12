@@ -9,7 +9,7 @@ include /usr/share/openstack-pkg-tools/pkgos.make
 export OSLO_PACKAGE_VERSION=$(VERSION)
 
 %:
-	dh $@ --buildsystem=python_distutils --with python2,python3
+	dh $@ --buildsystem=python_distutils --with python2,python3,sphinxdoc
 
 override_dh_install:
 	set -e ; for pyvers in $(PYTHONS); do \
@@ -41,3 +41,19 @@ ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
 		testr-python$$PYMAJOR slowest ; \
 	done
 endif
+
+override_dh_sphinxdoc:
+ifeq (,$(findstring nodocs, $(DEB_BUILD_OPTIONS)))
+	PYTHONPATH=. sphinx-build -b html doc/source debian/python-taskflow-doc/usr/share/doc/python-taskflow-doc/html
+	dh_sphinxdoc -O--buildsystem=python_distutils
+endif
+
+# Commands not to run
+override_dh_installcatalogs:
+override_dh_installemacsen override_dh_installifupdown:
+override_dh_installinfo override_dh_installmenu override_dh_installmime:
+override_dh_installmodules override_dh_installlogcheck:
+override_dh_installpam override_dh_installppp override_dh_installudev override_dh_installwm:
+override_dh_installxfonts override_dh_gconf override_dh_icons override_dh_perl override_dh_usrlocal:
+override_dh_installcron override_dh_installdebconf:
+override_dh_installlogrotate override_dh_installgsettings:

@@ -1,0 +1,9 @@
+Document: python-taskflow-doc
+Title: Taskflow Documentation
+Author: OpenStack
+Abstract: Sphinx documentation for Taskflow
+Section: Programming/Python
+
+Format: HTML
+Index: /usr/share/doc/python-taskflow-doc/html/index.html
+Files: /usr/share/doc/python-taskflow-doc/html/*
