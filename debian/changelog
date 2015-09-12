@@ -1,3 +1,9 @@
+python-taskflow (1.17.0-3) experimental; urgency=medium
+
+  * Added Python3 support (Closes: #798018).
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 12 Sep 2015 07:56:16 +0000
+
 python-taskflow (1.17.0-2) experimental; urgency=medium
 
   * Applied what's remaining as usefull in the Ubuntu patch (Closes: #791930).
