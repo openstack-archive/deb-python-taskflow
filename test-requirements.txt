@@ -3,7 +3,7 @@
 # process, which may cause wedges in the gate later.
 
 hacking<0.11,>=0.10.0
-oslotest>=1.7.0 # Apache-2.0
+oslotest>=1.10.0 # Apache-2.0
 mock>=1.2
 testtools>=1.4.0
 testscenarios>=0.4
@@ -22,9 +22,9 @@ kazoo>=2.2
 redis>=2.10.0
 
 # Used for testing database persistence backends.
-SQLAlchemy<1.1.0,>=0.9.7
-alembic>=0.7.2
-psycopg2
+SQLAlchemy<1.1.0,>=0.9.9
+alembic>=0.8.0
+psycopg2>=2.5
 PyMySQL>=0.6.2 # MIT License
 
 # Used for making sure we still work with eventlet.

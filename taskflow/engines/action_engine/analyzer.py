@@ -14,8 +14,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import functools
+import abc
 import itertools
+import weakref
 
 from networkx.algorithms import traversal
 import six
@@ -23,7 +24,33 @@ import six
 from taskflow import states as st
 
 
-class IgnoreDecider(object):
+@six.add_metaclass(abc.ABCMeta)
+class Decider(object):
+    """Base class for deciders.
+
+    Provides interface to be implemented by sub-classes
+    Decider checks whether next atom in flow should be executed or not
+    """
+
+    @abc.abstractmethod
+    def check(self, runtime):
+        """Returns bool of whether this decider should allow running."""
+
+    @abc.abstractmethod
+    def affect(self, runtime):
+        """If the :py:func:`~.check` returns false, affects associated atoms.
+
+        """
+
+    def check_and_affect(self, runtime):
+        """Handles :py:func:`~.check` + :py:func:`~.affect` in right order."""
+        proceed = self.check(runtime)
+        if not proceed:
+            self.affect(runtime)
+        return proceed
+
+
+class IgnoreDecider(Decider):
     """Checks any provided edge-deciders and determines if ok to run."""
 
     def __init__(self, atom, edge_deciders):
@@ -51,15 +78,8 @@ class IgnoreDecider(object):
         runtime.reset_nodes(itertools.chain([self._atom], successors_iter),
                             state=st.IGNORE, intention=st.IGNORE)
 
-    def check_and_affect(self, runtime):
-        """Handles :py:func:`~.check` + :py:func:`~.affect` in right order."""
-        proceed = self.check(runtime)
-        if not proceed:
-            self.affect(runtime)
-        return proceed
 
-
-class NoOpDecider(object):
+class NoOpDecider(Decider):
     """No-op decider that says it is always ok to run & has no effect(s)."""
 
     def check(self, runtime):
@@ -68,13 +88,6 @@ class NoOpDecider(object):
 
     def affect(self, runtime):
         """Does nothing."""
-
-    def check_and_affect(self, runtime):
-        """Handles :py:func:`~.check` + :py:func:`~.affect` in right order.
-
-        Does nothing.
-        """
-        return self.check(runtime)
 
 
 class Analyzer(object):
@@ -88,12 +101,9 @@ class Analyzer(object):
     """
 
     def __init__(self, runtime):
+        self._runtime = weakref.proxy(runtime)
         self._storage = runtime.storage
         self._execution_graph = runtime.compilation.execution_graph
-        self._check_atom_transition = runtime.check_atom_transition
-        self._fetch_edge_deciders = runtime.fetch_edge_deciders
-        self._fetch_retries = functools.partial(
-            runtime.fetch_atoms_by_kind, 'retry')
 
     def get_next_nodes(self, node=None):
         """Get next nodes to run (originating from node or all nodes)."""
@@ -161,7 +171,8 @@ class Analyzer(object):
 
         state = self.get_state(atom)
         intention = self._storage.get_atom_intention(atom.name)
-        transition = self._check_atom_transition(atom, state, st.RUNNING)
+        transition = self._runtime.check_atom_transition(atom, state,
+                                                         st.RUNNING)
         if not transition or intention != st.EXECUTE:
             return (False, None)
 
@@ -177,7 +188,7 @@ class Analyzer(object):
         if not ok_to_run:
             return (False, None)
         else:
-            edge_deciders = self._fetch_edge_deciders(atom)
+            edge_deciders = self._runtime.fetch_edge_deciders(atom)
             return (True, IgnoreDecider(atom, edge_deciders))
 
     def _get_maybe_ready_for_revert(self, atom):
@@ -185,7 +196,8 @@ class Analyzer(object):
 
         state = self.get_state(atom)
         intention = self._storage.get_atom_intention(atom.name)
-        transition = self._check_atom_transition(atom, state, st.REVERTING)
+        transition = self._runtime.check_atom_transition(atom, state,
+                                                         st.REVERTING)
         if not transition or intention not in (st.REVERT, st.RETRY):
             return (False, None)
 
@@ -213,7 +225,7 @@ class Analyzer(object):
 
         If no state is provided it will yield back all retry atoms.
         """
-        for atom in self._fetch_retries():
+        for atom in self._runtime.fetch_atoms_by_kind('retry'):
             if not state or self.get_state(atom) == state:
                 yield atom
 

@@ -215,7 +215,7 @@ Redis
 **Board type**: ``'redis'``
 
 Uses `redis`_ to provide the jobboard capabilities and semantics by using
-a redis hash datastructure and individual job ownership keys (that can
+a redis hash data structure and individual job ownership keys (that can
 optionally expire after a given amount of time).
 
 .. note::
@@ -303,5 +303,5 @@ Hierarchy
 .. _paradigm shift: https://wiki.openstack.org/wiki/TaskFlow/Paradigm_shifts#Workflow_ownership_transfer
 .. _zookeeper: http://zookeeper.apache.org/
 .. _kazoo: http://kazoo.readthedocs.org/
-.. _stevedore: http://stevedore.readthedocs.org/
+.. _stevedore: http://docs.openstack.org/developer/stevedore/
 .. _redis: http://redis.io/

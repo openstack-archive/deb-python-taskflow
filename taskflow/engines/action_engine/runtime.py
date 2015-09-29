@@ -16,14 +16,16 @@
 
 import functools
 
+from futurist import waiters
+
 from taskflow.engines.action_engine.actions import retry as ra
 from taskflow.engines.action_engine.actions import task as ta
 from taskflow.engines.action_engine import analyzer as an
+from taskflow.engines.action_engine import builder as bu
 from taskflow.engines.action_engine import completer as co
-from taskflow.engines.action_engine import runner as ru
 from taskflow.engines.action_engine import scheduler as sched
 from taskflow.engines.action_engine import scopes as sc
-from taskflow import flow as flow_type
+from taskflow import flow
 from taskflow import states as st
 from taskflow import task
 from taskflow.utils import async_utils
@@ -88,7 +90,7 @@ class Runtime(object):
                 # is able to run (or should not) ensure we retain it and use
                 # it later as needed.
                 u_v_data = execution_graph.adj[previous_atom][atom]
-                u_v_decider = u_v_data.get(flow_type.LINK_DECIDER)
+                u_v_decider = u_v_data.get(flow.LINK_DECIDER)
                 if u_v_decider is not None:
                     edge_deciders[previous_atom.name] = u_v_decider
             metadata['scope_walker'] = walker
@@ -113,8 +115,8 @@ class Runtime(object):
         return an.Analyzer(self)
 
     @misc.cachedproperty
-    def runner(self):
-        return ru.Runner(self, async_utils.wait_for_any)
+    def builder(self):
+        return bu.MachineBuilder(self, waiters.wait_for_any)
 
     @misc.cachedproperty
     def completer(self):
