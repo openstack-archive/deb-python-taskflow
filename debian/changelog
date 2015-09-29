@@ -4,6 +4,7 @@ python-taskflow (1.21.0-1) UNRELEASED; urgency=medium
   * d/control: Fixed (build-)depends for this release.
   * d/control: python-mysql is now replaced with python-pymysql.
   * d/control: unittest2 is not used anymore.
+  * d/patches: Add use-async_utils.patch
 
  -- Ivan Udovichenko <iudovichenko@mirantis.com>  Tue, 29 Sep 2015 9:14:38 +0300
 
