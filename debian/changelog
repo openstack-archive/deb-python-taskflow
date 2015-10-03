@@ -1,12 +1,16 @@
 python-taskflow (1.21.0-1) experimental; urgency=medium
 
+  [ Ivan Udovichenko ]
   * New upstream release.
   * d/control: Fixed (build-)depends for this release.
   * d/control: python-mysql is now replaced with python-pymysql.
   * d/control: unittest2 is not used anymore.
   * d/patches: Add use-async_utils.patch
 
- -- Ivan Udovichenko <iudovichenko@mirantis.com>  Tue, 29 Sep 2015 9:14:38 +0300
+  [ Thomas Goirand ]
+  * Added python{3,}-netifaces as build-depends-indep.
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 03 Oct 2015 18:44:05 +0000
 
 python-taskflow (1.17.0-3) experimental; urgency=medium
 
