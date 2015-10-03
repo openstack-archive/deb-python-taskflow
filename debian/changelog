@@ -1,4 +1,4 @@
-python-taskflow (1.21.0-1) UNRELEASED; urgency=medium
+python-taskflow (1.21.0-1) experimental; urgency=medium
 
   * New upstream release.
   * d/control: Fixed (build-)depends for this release.
