@@ -1,3 +1,10 @@
+python-taskflow (1.21.0-3) unstable; urgency=medium
+
+  * Downgrade python-networkx minimum version to 1.9 instead of 1.10, as it
+    doesn't look like the update will come soon.
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 17 Oct 2015 23:20:16 +0000
+
 python-taskflow (1.21.0-2) unstable; urgency=medium
 
   * Uploading to unstable.
