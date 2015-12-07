@@ -25,7 +25,6 @@ from taskflow.engines.worker_based import server as worker_server
 from taskflow import test
 from taskflow.tests import utils as test_utils
 from taskflow.types import failure
-from taskflow.utils import async_utils
 from taskflow.utils import threading_utils
 
 
