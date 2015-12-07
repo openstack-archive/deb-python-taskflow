@@ -67,7 +67,7 @@ class Flow(flow.Flow):
 
     def __init__(self, name, retry=None):
         super(Flow, self).__init__(name, retry)
-        self._graph = gr.DiGraph()
+        self._graph = gr.DiGraph(name=name)
         self._graph.freeze()
 
     #: Extracts the unsatisified symbol requirements of a single node.
@@ -266,12 +266,16 @@ class Flow(flow.Flow):
         return self._get_subgraph().number_of_nodes()
 
     def __iter__(self):
-        for n in self._get_subgraph().topological_sort():
+        for n, _n_data in self.iter_nodes():
             yield n
 
     def iter_links(self):
-        for (u, v, e_data) in self._get_subgraph().edges_iter(data=True):
-            yield (u, v, e_data)
+        return self._get_subgraph().edges_iter(data=True)
+
+    def iter_nodes(self):
+        g = self._get_subgraph()
+        for n in g.topological_sort():
+            yield n, g.node[n]
 
     @property
     def requires(self):

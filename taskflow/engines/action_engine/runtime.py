@@ -14,6 +14,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import functools
 
 from futurist import waiters
@@ -22,13 +23,13 @@ from taskflow.engines.action_engine.actions import retry as ra
 from taskflow.engines.action_engine.actions import task as ta
 from taskflow.engines.action_engine import analyzer as an
 from taskflow.engines.action_engine import builder as bu
+from taskflow.engines.action_engine import compiler as com
 from taskflow.engines.action_engine import completer as co
 from taskflow.engines.action_engine import scheduler as sched
 from taskflow.engines.action_engine import scopes as sc
-from taskflow import flow
+from taskflow import exceptions as exc
+from taskflow.flow import LINK_DECIDER
 from taskflow import states as st
-from taskflow import task
-from taskflow.utils import async_utils
 from taskflow.utils import misc
 
 
@@ -41,14 +42,42 @@ class Runtime(object):
     """
 
     def __init__(self, compilation, storage, atom_notifier,
-                 task_executor, retry_executor):
+                 task_executor, retry_executor, options=None):
         self._atom_notifier = atom_notifier
         self._task_executor = task_executor
         self._retry_executor = retry_executor
         self._storage = storage
         self._compilation = compilation
         self._atom_cache = {}
-        self._atoms_by_kind = {}
+        self._options = misc.ensure_dict(options)
+
+    @staticmethod
+    def _walk_edge_deciders(graph, atom):
+        """Iterates through all nodes, deciders that alter atoms execution."""
+        # This is basically a reverse breadth first exploration, with
+        # special logic to further traverse down flow nodes...
+        predecessors_iter = graph.predecessors_iter
+        nodes = collections.deque((u_node, atom)
+                                  for u_node in predecessors_iter(atom))
+        visited = set()
+        while nodes:
+            u_node, v_node = nodes.popleft()
+            u_node_kind = graph.node[u_node]['kind']
+            try:
+                yield (u_node, u_node_kind,
+                       graph.adj[u_node][v_node][LINK_DECIDER])
+            except KeyError:
+                pass
+            if u_node_kind == com.FLOW and u_node not in visited:
+                # Avoid re-exploring the same flow if we get to this
+                # same flow by a different *future* path...
+                visited.add(u_node)
+                # Since we *currently* jump over flow node(s), we need to make
+                # sure that any prior decider that was directed at this flow
+                # node also gets used during future decisions about this
+                # atom node.
+                nodes.extend((u_u_node, u_node)
+                             for u_u_node in predecessors_iter(u_node))
 
     def compile(self):
         """Compiles & caches frequently used execution helper objects.
@@ -60,47 +89,39 @@ class Runtime(object):
         specific scheduler and so-on).
         """
         change_state_handlers = {
-            'task': functools.partial(self.task_action.change_state,
-                                      progress=0.0),
-            'retry': self.retry_action.change_state,
+            com.TASK: functools.partial(self.task_action.change_state,
+                                        progress=0.0),
+            com.RETRY: self.retry_action.change_state,
         }
         schedulers = {
-            'retry': self.retry_scheduler,
-            'task': self.task_scheduler,
+            com.RETRY: self.retry_scheduler,
+            com.TASK: self.task_scheduler,
         }
-        execution_graph = self._compilation.execution_graph
-        all_retry_atoms = []
-        all_task_atoms = []
-        for atom in self.analyzer.iterate_all_nodes():
-            metadata = {}
-            walker = sc.ScopeWalker(self.compilation, atom, names_only=True)
-            if isinstance(atom, task.BaseTask):
-                check_transition_handler = st.check_task_transition
-                change_state_handler = change_state_handlers['task']
-                scheduler = schedulers['task']
-                all_task_atoms.append(atom)
+        check_transition_handlers = {
+            com.TASK: st.check_task_transition,
+            com.RETRY: st.check_retry_transition,
+        }
+        graph = self._compilation.execution_graph
+        for node, node_data in graph.nodes_iter(data=True):
+            node_kind = node_data['kind']
+            if node_kind == com.FLOW:
+                continue
+            elif node_kind in com.ATOMS:
+                check_transition_handler = check_transition_handlers[node_kind]
+                change_state_handler = change_state_handlers[node_kind]
+                scheduler = schedulers[node_kind]
             else:
-                check_transition_handler = st.check_retry_transition
-                change_state_handler = change_state_handlers['retry']
-                scheduler = schedulers['retry']
-                all_retry_atoms.append(atom)
-            edge_deciders = {}
-            for previous_atom in execution_graph.predecessors(atom):
-                # If there is any link function that says if this connection
-                # is able to run (or should not) ensure we retain it and use
-                # it later as needed.
-                u_v_data = execution_graph.adj[previous_atom][atom]
-                u_v_decider = u_v_data.get(flow.LINK_DECIDER)
-                if u_v_decider is not None:
-                    edge_deciders[previous_atom.name] = u_v_decider
+                raise exc.CompilationFailure("Unknown node kind '%s'"
+                                             " encountered" % node_kind)
+            metadata = {}
+            deciders_it = self._walk_edge_deciders(graph, node)
+            walker = sc.ScopeWalker(self.compilation, node, names_only=True)
             metadata['scope_walker'] = walker
             metadata['check_transition_handler'] = check_transition_handler
             metadata['change_state_handler'] = change_state_handler
             metadata['scheduler'] = scheduler
-            metadata['edge_deciders'] = edge_deciders
-            self._atom_cache[atom.name] = metadata
-        self._atoms_by_kind['retry'] = all_retry_atoms
-        self._atoms_by_kind['task'] = all_task_atoms
+            metadata['edge_deciders'] = tuple(deciders_it)
+            self._atom_cache[node.name] = metadata
 
     @property
     def compilation(self):
@@ -109,6 +130,10 @@ class Runtime(object):
     @property
     def storage(self):
         return self._storage
+
+    @property
+    def options(self):
+        return self._options
 
     @misc.cachedproperty
     def analyzer(self):
@@ -163,15 +188,6 @@ class Runtime(object):
         metadata = self._atom_cache[atom.name]
         return metadata['edge_deciders']
 
-    def fetch_atoms_by_kind(self, kind):
-        """Fetches all the atoms of a given kind.
-
-        NOTE(harlowja): Currently only ``task`` or ``retry`` are valid
-                        kinds of atoms (requesting other kinds will just
-                        return empty lists).
-        """
-        return self._atoms_by_kind.get(kind, [])
-
     def fetch_scheduler(self, atom):
         """Fetches the cached specific scheduler for the given atom."""
         # This does not check if the name exists (since this is only used
@@ -198,7 +214,7 @@ class Runtime(object):
     # Various helper methods used by the runtime components; not for public
     # consumption...
 
-    def reset_nodes(self, atoms, state=st.PENDING, intention=st.EXECUTE):
+    def reset_atoms(self, atoms, state=st.PENDING, intention=st.EXECUTE):
         """Resets all the provided atoms to the given state and intention."""
         tweaked = []
         for atom in atoms:
@@ -214,7 +230,7 @@ class Runtime(object):
 
     def reset_all(self, state=st.PENDING, intention=st.EXECUTE):
         """Resets all atoms to the given state and intention."""
-        return self.reset_nodes(self.analyzer.iterate_all_nodes(),
+        return self.reset_atoms(self.analyzer.iterate_nodes(com.ATOMS),
                                 state=state, intention=intention)
 
     def reset_subgraph(self, atom, state=st.PENDING, intention=st.EXECUTE):
@@ -222,8 +238,9 @@ class Runtime(object):
 
         The subgraph is contained of all of the atoms successors.
         """
-        return self.reset_nodes(self.analyzer.iterate_subgraph(atom),
-                                state=state, intention=intention)
+        return self.reset_atoms(
+            self.analyzer.iterate_connected_atoms(atom),
+            state=state, intention=intention)
 
     def retry_subflow(self, retry):
         """Prepares a retrys + its subgraph for execution.
@@ -232,5 +249,6 @@ class Runtime(object):
         subgraph (its successors) to the ``PENDING`` state with an ``EXECUTE``
         intention.
         """
-        self.storage.set_atom_intention(retry.name, st.EXECUTE)
-        self.reset_subgraph(retry)
+        tweaked = self.reset_atoms([retry], state=None, intention=st.EXECUTE)
+        tweaked.extend(self.reset_subgraph(retry))
+        return tweaked

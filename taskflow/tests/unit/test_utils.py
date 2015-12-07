@@ -179,19 +179,19 @@ class TestSequenceMinus(test.TestCase):
 
     def test_simple_case(self):
         result = misc.sequence_minus([1, 2, 3, 4], [2, 3])
-        self.assertEqual(result, [1, 4])
+        self.assertEqual([1, 4], result)
 
     def test_subtrahend_has_extra_elements(self):
         result = misc.sequence_minus([1, 2, 3, 4], [2, 3, 5, 7, 13])
-        self.assertEqual(result, [1, 4])
+        self.assertEqual([1, 4], result)
 
     def test_some_items_are_equal(self):
         result = misc.sequence_minus([1, 1, 1, 1], [1, 1, 3])
-        self.assertEqual(result, [1, 1])
+        self.assertEqual([1, 1], result)
 
     def test_equal_items_not_continious(self):
         result = misc.sequence_minus([1, 2, 3, 1], [1, 3])
-        self.assertEqual(result, [2, 1])
+        self.assertEqual([2, 1], result)
 
 
 class TestReversedEnumerate(testscenarios.TestWithScenarios, test.TestCase):
@@ -301,11 +301,11 @@ class TestMergeUri(test.TestCase):
 class TestClamping(test.TestCase):
     def test_simple_clamp(self):
         result = misc.clamp(1.0, 2.0, 3.0)
-        self.assertEqual(result, 2.0)
+        self.assertEqual(2.0, result)
         result = misc.clamp(4.0, 2.0, 3.0)
-        self.assertEqual(result, 3.0)
+        self.assertEqual(3.0, result)
         result = misc.clamp(3.0, 4.0, 4.0)
-        self.assertEqual(result, 4.0)
+        self.assertEqual(4.0, result)
 
     def test_invalid_clamp(self):
         self.assertRaises(ValueError, misc.clamp, 0.0, 2.0, 1.0)
@@ -340,3 +340,27 @@ class TestIterable(test.TestCase):
 
     def test_dict(self):
         self.assertTrue(misc.is_iterable(dict()))
+
+
+class TestEnsureDict(testscenarios.TestWithScenarios):
+    scenarios = [
+        ('none', {'original': None, 'expected': {}}),
+        ('empty_dict', {'original': {}, 'expected': {}}),
+        ('empty_list', {'original': [], 'expected': {}}),
+        ('dict', {'original': {'a': 1, 'b': 2}, 'expected': {'a': 1, 'b': 2}}),
+    ]
+
+    def test_expected(self):
+        self.assertEqual(self.expected, misc.ensure_dict(self.original))
+        self.assertFalse(self.expected is misc.ensure_dict(self.original))
+
+
+class TestEnsureDictRaises(testscenarios.TestWithScenarios):
+    scenarios = [
+        ('list', {'original': [1, 2], 'exception': TypeError}),
+        ('tuple', {'original': (1, 2), 'exception': TypeError}),
+        ('set', {'original': set([1, 2]), 'exception': TypeError}),
+    ]
+
+    def test_exceptions(self):
+        self.assertRaises(self.exception, misc.ensure_dict, self.original)

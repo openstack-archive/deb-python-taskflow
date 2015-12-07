@@ -22,6 +22,7 @@ import errno
 import inspect
 import os
 import re
+import socket
 import sys
 import threading
 import types
@@ -34,7 +35,6 @@ from oslo_utils import importutils
 from oslo_utils import netutils
 from oslo_utils import reflection
 import six
-from six.moves import map as compat_map
 from six.moves import range as compat_range
 
 from taskflow.types import failure
@@ -42,6 +42,7 @@ from taskflow.types import notifier
 from taskflow.utils import deprecation
 
 
+UNKNOWN_HOSTNAME = "<unknown>"
 NUMERIC_TYPES = six.integer_types + (float,)
 
 # NOTE(imelnikov): regular expression to get scheme from URI,
@@ -58,6 +59,26 @@ class StrEnum(str, enum.Enum):
                 raise TypeError("Enumeration '%s' (%s) is not"
                                 " a string" % (a, type(a).__name__))
         return super(StrEnum, cls).__new__(cls, *args, **kwargs)
+
+
+class StringIO(six.StringIO):
+    """String buffer with some small additions."""
+
+    def write_nl(self, value, linesep=os.linesep):
+        self.write(value)
+        self.write(linesep)
+
+
+def get_hostname(unknown_hostname=UNKNOWN_HOSTNAME):
+    """Gets the machines hostname; if not able to returns an invalid one."""
+    try:
+        hostname = socket.getfqdn()
+        if not hostname:
+            return unknown_hostname
+        else:
+            return hostname
+    except socket.error:
+        return unknown_hostname
 
 
 def match_type(obj, matchers):
@@ -431,18 +452,6 @@ def sequence_minus(seq1, seq2):
     return result
 
 
-def get_duplicate_keys(iterable, key=None):
-    if key is not None:
-        iterable = compat_map(key, iterable)
-    keys = set()
-    duplicates = set()
-    for item in iterable:
-        if item in keys:
-            duplicates.add(item)
-        keys.add(item)
-    return duplicates
-
-
 class ExponentialBackoff(object):
     """An iterable object that will yield back an exponential delay sequence.
 
@@ -573,3 +582,11 @@ def is_iterable(obj):
     """
     return (not isinstance(obj, six.string_types) and
             isinstance(obj, collections.Iterable))
+
+
+def ensure_dict(obj):
+    """Copy an existing dictionary or default to empty dict...."""
+    if not obj:
+        return {}
+    # default to a shallow copy to avoid most ownership issues
+    return dict(obj)

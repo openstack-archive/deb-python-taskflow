@@ -18,6 +18,8 @@ import collections
 import contextlib
 import threading
 
+import futurist
+import testscenarios
 from zake import fake_client
 
 from taskflow.conductors import backends
@@ -51,23 +53,39 @@ def test_factory(blowup):
     return f
 
 
+def single_factory():
+    return futurist.ThreadPoolExecutor(max_workers=1)
+
+
 ComponentBundle = collections.namedtuple('ComponentBundle',
                                          ['board', 'client',
                                           'persistence', 'conductor'])
 
 
-class BlockingConductorTest(test_utils.EngineTestBase, test.TestCase):
-    KIND = 'blocking'
+class ManyConductorTest(testscenarios.TestWithScenarios,
+                        test_utils.EngineTestBase, test.TestCase):
+    scenarios = [
+        ('blocking', {'kind': 'blocking',
+                      'conductor_kwargs': {'wait_timeout': 0.1}}),
+        ('nonblocking_many_thread',
+         {'kind': 'nonblocking', 'conductor_kwargs': {'wait_timeout': 0.1}}),
+        ('nonblocking_one_thread', {'kind': 'nonblocking',
+                                    'conductor_kwargs': {
+                                        'executor_factory': single_factory,
+                                        'wait_timeout': 0.1,
+                                    }})
+    ]
 
-    def make_components(self, name='testing', wait_timeout=0.1):
+    def make_components(self):
         client = fake_client.FakeClient()
         persistence = impl_memory.MemoryBackend()
-        board = impl_zookeeper.ZookeeperJobBoard(name, {},
+        board = impl_zookeeper.ZookeeperJobBoard('testing', {},
                                                  client=client,
                                                  persistence=persistence)
-        conductor = backends.fetch(self.KIND, name, board,
-                                   persistence=persistence,
-                                   wait_timeout=wait_timeout)
+        conductor_kwargs = self.conductor_kwargs.copy()
+        conductor_kwargs['persistence'] = persistence
+        conductor = backends.fetch(self.kind, 'testing', board,
+                                   **conductor_kwargs)
         return ComponentBundle(board, client, persistence, conductor)
 
     def test_connection(self):
@@ -95,11 +113,25 @@ class BlockingConductorTest(test_utils.EngineTestBase, test.TestCase):
         components = self.make_components()
         components.conductor.connect()
         consumed_event = threading.Event()
+        job_consumed_event = threading.Event()
+        job_abandoned_event = threading.Event()
 
         def on_consume(state, details):
             consumed_event.set()
 
+        def on_job_consumed(event, details):
+            if event == 'job_consumed':
+                job_consumed_event.set()
+
+        def on_job_abandoned(event, details):
+            if event == 'job_abandoned':
+                job_abandoned_event.set()
+
         components.board.notifier.register(base.REMOVAL, on_consume)
+        components.conductor.notifier.register("job_consumed",
+                                               on_job_consumed)
+        components.conductor.notifier.register("job_abandoned",
+                                               on_job_abandoned)
         with close_many(components.conductor, components.client):
             t = threading_utils.daemon_thread(components.conductor.run)
             t.start()
@@ -110,6 +142,8 @@ class BlockingConductorTest(test_utils.EngineTestBase, test.TestCase):
             components.board.post('poke', lb,
                                   details={'flow_uuid': fd.uuid})
             self.assertTrue(consumed_event.wait(test_utils.WAIT_TIMEOUT))
+            self.assertTrue(job_consumed_event.wait(test_utils.WAIT_TIMEOUT))
+            self.assertFalse(job_abandoned_event.wait(1))
             components.conductor.stop()
             self.assertTrue(components.conductor.wait(test_utils.WAIT_TIMEOUT))
             self.assertFalse(components.conductor.dispatching)
@@ -121,7 +155,7 @@ class BlockingConductorTest(test_utils.EngineTestBase, test.TestCase):
         self.assertIsNotNone(fd)
         self.assertEqual(st.SUCCESS, fd.state)
 
-    def test_fail_run(self):
+    def test_run_max_dispatches(self):
         components = self.make_components()
         components.conductor.connect()
         consumed_event = threading.Event()
@@ -130,6 +164,48 @@ class BlockingConductorTest(test_utils.EngineTestBase, test.TestCase):
             consumed_event.set()
 
         components.board.notifier.register(base.REMOVAL, on_consume)
+        with close_many(components.client, components.conductor):
+            t = threading_utils.daemon_thread(
+                lambda: components.conductor.run(max_dispatches=5))
+            t.start()
+            lb, fd = pu.temporary_flow_detail(components.persistence)
+            engines.save_factory_details(fd, test_factory,
+                                         [False], {},
+                                         backend=components.persistence)
+            for _ in range(5):
+                components.board.post('poke', lb,
+                                      details={'flow_uuid': fd.uuid})
+                self.assertTrue(consumed_event.wait(
+                    test_utils.WAIT_TIMEOUT))
+            components.board.post('poke', lb,
+                                  details={'flow_uuid': fd.uuid})
+            components.conductor.stop()
+            self.assertTrue(components.conductor.wait(test_utils.WAIT_TIMEOUT))
+            self.assertFalse(components.conductor.dispatching)
+
+    def test_fail_run(self):
+        components = self.make_components()
+        components.conductor.connect()
+        consumed_event = threading.Event()
+        job_consumed_event = threading.Event()
+        job_abandoned_event = threading.Event()
+
+        def on_consume(state, details):
+            consumed_event.set()
+
+        def on_job_consumed(event, details):
+            if event == 'job_consumed':
+                job_consumed_event.set()
+
+        def on_job_abandoned(event, details):
+            if event == 'job_abandoned':
+                job_abandoned_event.set()
+
+        components.board.notifier.register(base.REMOVAL, on_consume)
+        components.conductor.notifier.register("job_consumed",
+                                               on_job_consumed)
+        components.conductor.notifier.register("job_abandoned",
+                                               on_job_abandoned)
         with close_many(components.conductor, components.client):
             t = threading_utils.daemon_thread(components.conductor.run)
             t.start()
@@ -140,6 +216,8 @@ class BlockingConductorTest(test_utils.EngineTestBase, test.TestCase):
             components.board.post('poke', lb,
                                   details={'flow_uuid': fd.uuid})
             self.assertTrue(consumed_event.wait(test_utils.WAIT_TIMEOUT))
+            self.assertTrue(job_consumed_event.wait(test_utils.WAIT_TIMEOUT))
+            self.assertFalse(job_abandoned_event.wait(1))
             components.conductor.stop()
             self.assertTrue(components.conductor.wait(test_utils.WAIT_TIMEOUT))
             self.assertFalse(components.conductor.dispatching)
@@ -150,3 +228,29 @@ class BlockingConductorTest(test_utils.EngineTestBase, test.TestCase):
             fd = lb.find(fd.uuid)
         self.assertIsNotNone(fd)
         self.assertEqual(st.REVERTED, fd.state)
+
+
+class NonBlockingExecutorTest(test.TestCase):
+    def test_bad_wait_timeout(self):
+        persistence = impl_memory.MemoryBackend()
+        client = fake_client.FakeClient()
+        board = impl_zookeeper.ZookeeperJobBoard('testing', {},
+                                                 client=client,
+                                                 persistence=persistence)
+        self.assertRaises(ValueError,
+                          backends.fetch,
+                          'nonblocking', 'testing', board,
+                          persistence=persistence,
+                          wait_timeout='testing')
+
+    def test_bad_factory(self):
+        persistence = impl_memory.MemoryBackend()
+        client = fake_client.FakeClient()
+        board = impl_zookeeper.ZookeeperJobBoard('testing', {},
+                                                 client=client,
+                                                 persistence=persistence)
+        self.assertRaises(ValueError,
+                          backends.fetch,
+                          'nonblocking', 'testing', board,
+                          persistence=persistence,
+                          executor_factory='testing')

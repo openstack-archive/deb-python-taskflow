@@ -386,6 +386,15 @@ class JobBoard(object):
             this must be the same name that was used for claiming this job.
         """
 
+    @abc.abstractmethod
+    def register_entity(self, entity):
+        """Register an entity to the jobboard('s backend), e.g: a conductor.
+
+        :param entity: entity to register as being associated with the
+                       jobboard('s backend)
+        :type entity: :py:class:`~taskflow.types.entity.Entity`
+        """
+
     @abc.abstractproperty
     def connected(self):
         """Returns if this jobboard is connected."""

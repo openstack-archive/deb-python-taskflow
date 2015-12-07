@@ -18,8 +18,10 @@ import abc
 import weakref
 
 from oslo_utils import reflection
+from oslo_utils import strutils
 import six
 
+from taskflow.engines.action_engine import compiler as co
 from taskflow.engines.action_engine import executor as ex
 from taskflow import logging
 from taskflow import retry as retry_atom
@@ -62,7 +64,7 @@ class RevertAndRetry(Strategy):
         self._retry = retry
 
     def apply(self):
-        tweaked = self._runtime.reset_nodes([self._retry], state=None,
+        tweaked = self._runtime.reset_atoms([self._retry], state=None,
                                             intention=st.RETRY)
         tweaked.extend(self._runtime.reset_subgraph(self._retry, state=None,
                                                     intention=st.REVERT))
@@ -79,8 +81,9 @@ class RevertAll(Strategy):
         self._analyzer = runtime.analyzer
 
     def apply(self):
-        return self._runtime.reset_nodes(self._analyzer.iterate_all_nodes(),
-                                         state=None, intention=st.REVERT)
+        return self._runtime.reset_atoms(
+            self._analyzer.iterate_nodes(co.ATOMS),
+            state=None, intention=st.REVERT)
 
 
 class Revert(Strategy):
@@ -93,7 +96,7 @@ class Revert(Strategy):
         self._atom = atom
 
     def apply(self):
-        tweaked = self._runtime.reset_nodes([self._atom], state=None,
+        tweaked = self._runtime.reset_atoms([self._atom], state=None,
                                             intention=st.REVERT)
         tweaked.extend(self._runtime.reset_subgraph(self._atom, state=None,
                                                     intention=st.REVERT))
@@ -111,54 +114,61 @@ class Completer(object):
         self._retry_action = runtime.retry_action
         self._undefined_resolver = RevertAll(self._runtime)
 
-    def _complete_task(self, task, event, result):
+    def _complete_task(self, task, outcome, result):
         """Completes the given task, processes task failure."""
-        if event == ex.EXECUTED:
+        if outcome == ex.EXECUTED:
             self._task_action.complete_execution(task, result)
         else:
             self._task_action.complete_reversion(task, result)
 
-    def _complete_retry(self, retry, event, result):
+    def _complete_retry(self, retry, outcome, result):
         """Completes the given retry, processes retry failure."""
-        if event == ex.EXECUTED:
+        if outcome == ex.EXECUTED:
             self._retry_action.complete_execution(retry, result)
         else:
             self._retry_action.complete_reversion(retry, result)
 
     def resume(self):
-        """Resumes nodes in the contained graph.
+        """Resumes atoms in the contained graph.
 
-        This is done to allow any previously completed or failed nodes to
-        be analyzed, there results processed and any potential nodes affected
+        This is done to allow any previously completed or failed atoms to
+        be analyzed, there results processed and any potential atoms affected
         to be adjusted as needed.
 
-        This should return a set of nodes which should be the initial set of
-        nodes that were previously not finished (due to a RUNNING or REVERTING
+        This should return a set of atoms which should be the initial set of
+        atoms that were previously not finished (due to a RUNNING or REVERTING
         attempt not previously finishing).
         """
-        for node in self._analyzer.iterate_all_nodes():
-            if self._analyzer.get_state(node) == st.FAILURE:
-                self._process_atom_failure(node, self._storage.get(node.name))
+        atoms = list(self._analyzer.iterate_nodes(co.ATOMS))
+        atom_states = self._storage.get_atoms_states(atom.name
+                                                     for atom in atoms)
+        for atom in atoms:
+            atom_state = atom_states[atom.name][0]
+            if atom_state == st.FAILURE:
+                self._process_atom_failure(atom, self._storage.get(atom.name))
         for retry in self._analyzer.iterate_retries(st.RETRYING):
-            self._runtime.retry_subflow(retry)
-        unfinished_nodes = set()
-        for node in self._analyzer.iterate_all_nodes():
-            if self._analyzer.get_state(node) in (st.RUNNING, st.REVERTING):
-                unfinished_nodes.add(node)
-        return unfinished_nodes
+            for atom, state, intention in self._runtime.retry_subflow(retry):
+                if state:
+                    atom_states[atom.name] = (state, intention)
+        unfinished_atoms = set()
+        for atom in atoms:
+            atom_state = atom_states[atom.name][0]
+            if atom_state in (st.RUNNING, st.REVERTING):
+                unfinished_atoms.add(atom)
+        return unfinished_atoms
 
-    def complete(self, node, event, result):
+    def complete(self, node, outcome, result):
         """Performs post-execution completion of a node.
 
         Returns whether the result should be saved into an accumulator of
         failures or whether this should not be done.
         """
         if isinstance(node, task_atom.BaseTask):
-            self._complete_task(node, event, result)
+            self._complete_task(node, outcome, result)
         else:
-            self._complete_retry(node, event, result)
+            self._complete_retry(node, outcome, result)
         if isinstance(result, failure.Failure):
-            if event == ex.EXECUTED:
+            if outcome == ex.EXECUTED:
                 self._process_atom_failure(node, result)
             else:
                 # Reverting failed, always retain the failure...
@@ -167,7 +177,7 @@ class Completer(object):
 
     def _determine_resolution(self, atom, failure):
         """Determines which resolution strategy to activate/apply."""
-        retry = self._analyzer.find_atom_retry(atom)
+        retry = self._analyzer.find_retry(atom)
         if retry is not None:
             # Ask retry controller what to do in case of failure.
             strategy = self._retry_action.on_failure(retry, atom, failure)
@@ -176,6 +186,20 @@ class Completer(object):
             elif strategy == retry_atom.REVERT:
                 # Ask parent retry and figure out what to do...
                 parent_resolver = self._determine_resolution(retry, failure)
+
+                # In the future, this will be the only behavior. REVERT
+                # should defer to the parent retry if it exists, or use the
+                # default REVERT_ALL if it doesn't. This lets you safely nest
+                # flows with retries inside flows without retries and it still
+                # behave as a user would expect, i.e. if the retry gets
+                # exhausted it reverts the outer flow unless the outer flow
+                # has a separate retry behavior.
+                defer_reverts = strutils.bool_from_string(
+                    self._runtime.options.get('defer_reverts', False)
+                )
+                if defer_reverts:
+                    return parent_resolver
+
                 # Ok if the parent resolver says something not REVERT, and
                 # it isn't just using the undefined resolver, assume the
                 # parent knows best.

@@ -390,6 +390,18 @@ CEO
         root = tree.Node("josh")
         self.assertTrue(root.empty())
 
+    def test_after_frozen(self):
+        root = tree.Node("josh")
+        root.add(tree.Node("josh.1"))
+        root.freeze()
+        self.assertTrue(
+            all(n.frozen for n in root.dfs_iter(include_self=True)))
+        self.assertRaises(tree.FrozenNode,
+                          root.remove, "josh.1")
+        self.assertRaises(tree.FrozenNode, root.disassociate)
+        self.assertRaises(tree.FrozenNode, root.add,
+                          tree.Node("josh.2"))
+
     def test_removal(self):
         root = self._make_species()
         self.assertIsNotNone(root.remove('reptile'))
@@ -467,23 +479,58 @@ CEO
         self.assertEqual(set(['animal', 'reptile', 'mammal', 'horse',
                               'primate', 'monkey', 'human']), set(things))
 
-    def test_dfs_itr_order(self):
+    def test_dfs_itr_left_to_right(self):
         root = self._make_species()
-        things = list([n.item for n in root.dfs_iter(include_self=True)])
-        self.assertEqual(['animal', 'mammal', 'horse', 'primate',
-                          'monkey', 'human', 'reptile'], things)
+        it = root.dfs_iter(include_self=False, right_to_left=False)
+        things = list([n.item for n in it])
+        self.assertEqual(['reptile', 'mammal', 'primate',
+                          'human', 'monkey', 'horse'], things)
+
+    def test_dfs_itr_no_self(self):
+        root = self._make_species()
         things = list([n.item for n in root.dfs_iter(include_self=False)])
         self.assertEqual(['mammal', 'horse', 'primate',
                           'monkey', 'human', 'reptile'], things)
 
-    def test_bfs_iter(self):
+    def test_bfs_itr(self):
         root = self._make_species()
         things = list([n.item for n in root.bfs_iter(include_self=True)])
         self.assertEqual(['animal', 'reptile', 'mammal', 'primate',
                           'horse', 'human', 'monkey'], things)
+
+    def test_bfs_itr_no_self(self):
+        root = self._make_species()
         things = list([n.item for n in root.bfs_iter(include_self=False)])
         self.assertEqual(['reptile', 'mammal', 'primate',
                           'horse', 'human', 'monkey'], things)
+
+    def test_bfs_itr_right_to_left(self):
+        root = self._make_species()
+        it = root.bfs_iter(include_self=False, right_to_left=True)
+        things = list([n.item for n in it])
+        self.assertEqual(['mammal', 'reptile', 'horse',
+                          'primate', 'monkey', 'human'], things)
+
+    def test_to_diagraph(self):
+        root = self._make_species()
+        g = root.to_digraph()
+        self.assertEqual(root.child_count(only_direct=False) + 1, len(g))
+        for node in root.dfs_iter(include_self=True):
+            self.assertIn(node.item, g)
+        self.assertEqual([], g.predecessors('animal'))
+        self.assertEqual(['animal'], g.predecessors('reptile'))
+        self.assertEqual(['primate'], g.predecessors('human'))
+        self.assertEqual(['mammal'], g.predecessors('primate'))
+        self.assertEqual(['animal'], g.predecessors('mammal'))
+        self.assertEqual(['mammal', 'reptile'], g.successors('animal'))
+
+    def test_to_digraph_retains_metadata(self):
+        root = tree.Node("chickens", alive=True)
+        dead_chicken = tree.Node("chicken.1", alive=False)
+        root.add(dead_chicken)
+        g = root.to_digraph()
+        self.assertEqual(g.node['chickens'], {'alive': True})
+        self.assertEqual(g.node['chicken.1'], {'alive': False})
 
 
 class OrderedSetTest(test.TestCase):
