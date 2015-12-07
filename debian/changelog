@@ -1,3 +1,9 @@
+python-taskflow (1.25.0-1) experimental; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 07 Dec 2015 17:52:48 +0100
+
 python-taskflow (1.21.0-3) unstable; urgency=medium
 
   * Downgrade python-networkx minimum version to 1.9 instead of 1.10, as it
