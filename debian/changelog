@@ -1,8 +1,8 @@
-python-taskflow (1.25.0-1~bpo8+1) UNRELEASED; urgency=medium
+python-taskflow (1.26.0-1) experimental; urgency=medium
 
-  * Rebuilt by bop.
+  * New upstream release.
 
- -- Thomas Goirand <zigo@debian.org>  Mon, 07 Dec 2015 18:03:18 +0100
+ -- Thomas Goirand <zigo@debian.org>  Sat, 16 Jan 2016 03:40:16 +0000
 
 python-taskflow (1.25.0-1) experimental; urgency=medium
 
