@@ -1,3 +1,9 @@
+python-taskflow (1.26.0-1) experimental; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 16 Jan 2016 03:40:16 +0000
+
 python-taskflow (1.25.0-1) experimental; urgency=medium
 
   * New upstream release.
