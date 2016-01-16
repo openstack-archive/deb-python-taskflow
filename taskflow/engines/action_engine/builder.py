@@ -137,8 +137,8 @@ class MachineBuilder(object):
             # attempt, which may be empty if never ran before) and any nodes
             # that are now ready to be ran.
             memory.next_up.update(
-                iter_utils.unique_seen(self._completer.resume(),
-                                       iter_next_atoms()))
+                iter_utils.unique_seen((self._completer.resume(),
+                                        iter_next_atoms())))
             return SCHEDULE
 
         def game_over(old_state, new_state, event):
@@ -156,9 +156,9 @@ class MachineBuilder(object):
             if leftover_atoms:
                 # Ok we didn't finish (either reverting or executing...) so
                 # that means we must of been stopped at some point...
-                LOG.blather("Suspension determined to have been reacted to"
-                            " since (at least) %s atoms have been left in an"
-                            " unfinished state", leftover_atoms)
+                LOG.trace("Suspension determined to have been reacted to"
+                          " since (at least) %s atoms have been left in an"
+                          " unfinished state", leftover_atoms)
                 return SUSPENDED
             elif self._analyzer.is_success():
                 return SUCCESS
@@ -223,11 +223,15 @@ class MachineBuilder(object):
                                           atom, intention)
                 except Exception:
                     memory.failures.append(failure.Failure())
+                    LOG.exception("Engine '%s' atom post-completion"
+                                  " failed", atom)
                 else:
                     try:
                         more_work = set(iter_next_atoms(atom=atom))
                     except Exception:
                         memory.failures.append(failure.Failure())
+                        LOG.exception("Engine '%s' atom post-completion"
+                                      " next atom searching failed", atom)
                     else:
                         next_up.update(more_work)
             if is_runnable() and next_up and not memory.failures:
@@ -246,10 +250,10 @@ class MachineBuilder(object):
             LOG.debug("Entering new state '%s' in response to event '%s'",
                       new_state, event)
 
-        # NOTE(harlowja): when ran in blather mode it is quite useful
+        # NOTE(harlowja): when ran in trace mode it is quite useful
         # to track the various state transitions as they happen...
         watchers = {}
-        if LOG.isEnabledFor(logging.BLATHER):
+        if LOG.isEnabledFor(logging.TRACE):
             watchers['on_exit'] = on_exit
             watchers['on_enter'] = on_enter
 

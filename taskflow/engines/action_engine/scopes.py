@@ -15,31 +15,10 @@
 #    under the License.
 
 from taskflow.engines.action_engine import compiler as co
+from taskflow.engines.action_engine import traversal as tr
 from taskflow import logging
 
 LOG = logging.getLogger(__name__)
-
-
-def _depth_first_reverse_iterate(node, idx=-1):
-    """Iterates connected (in reverse) nodes (from starting node).
-
-    Jumps through nodes with ``FLOW`` ``kind`` attribute (does not yield
-    them back).
-    """
-    # Always go left to right, since right to left is the pattern order
-    # and we want to go backwards and not forwards through that ordering...
-    if idx == -1:
-        children_iter = node.reverse_iter()
-    else:
-        children_iter = reversed(node[0:idx])
-    for child in children_iter:
-        if child.metadata['kind'] == co.FLOW:
-            # Jump through these...
-            for child_child in child.dfs_iter(right_to_left=False):
-                if child_child.metadata['kind'] in co.ATOMS:
-                    yield child_child.item
-        else:
-            yield child.item
 
 
 class ScopeWalker(object):
@@ -117,7 +96,9 @@ class ScopeWalker(object):
             except KeyError:
                 visible = []
                 removals = set()
-                for atom in _depth_first_reverse_iterate(parent, idx=last_idx):
+                atom_it = tr.depth_first_reverse_iterate(
+                    parent, start_from_idx=last_idx)
+                for atom in atom_it:
                     if atom in predecessors:
                         predecessors.remove(atom)
                         removals.add(atom)
@@ -125,11 +106,11 @@ class ScopeWalker(object):
                     if not predecessors:
                         break
                 self._level_cache[lvl] = (visible, removals)
-                if LOG.isEnabledFor(logging.BLATHER):
+                if LOG.isEnabledFor(logging.TRACE):
                     visible_names = [a.name for a in visible]
-                    LOG.blather("Scope visible to '%s' (limited by parent '%s'"
-                                " index < %s) is: %s", self._atom,
-                                parent.item.name, last_idx, visible_names)
+                    LOG.trace("Scope visible to '%s' (limited by parent '%s'"
+                              " index < %s) is: %s", self._atom,
+                              parent.item.name, last_idx, visible_names)
             if self._names_only:
                 yield [a.name for a in visible]
             else:

@@ -26,6 +26,7 @@ from taskflow import task
 from taskflow.types import graph as gr
 from taskflow.types import tree as tr
 from taskflow.utils import iter_utils
+from taskflow.utils import misc
 
 from taskflow.flow import (LINK_INVARIANT, LINK_RETRY)  # noqa
 
@@ -39,22 +40,55 @@ LOG = logging.getLogger(__name__)
 TASK = 'task'
 RETRY = 'retry'
 FLOW = 'flow'
+FLOW_END = 'flow_end'
 
 # Quite often used together, so make a tuple everyone can share...
 ATOMS = (TASK, RETRY)
+FLOWS = (FLOW, FLOW_END)
+
+
+class Terminator(object):
+    """Flow terminator class."""
+
+    def __init__(self, flow):
+        self._flow = flow
+        self._name = "%s[$]" % (self._flow.name,)
+
+    @property
+    def flow(self):
+        """The flow which this terminator signifies/marks the end of."""
+        return self._flow
+
+    @property
+    def name(self):
+        """Useful name this end terminator has (derived from flow name)."""
+        return self._name
+
+    def __str__(self):
+        return "%s[$]" % (self._flow,)
 
 
 class Compilation(object):
-    """The result of a compilers compile() is this *immutable* object."""
+    """The result of a compilers ``compile()`` is this *immutable* object."""
 
-    #: Task nodes will have a ``kind`` attribute/metadata key with this value.
+    #: Task nodes will have a ``kind`` metadata key with this value.
     TASK = TASK
 
-    #: Retry nodes will have a ``kind`` attribute/metadata key with this value.
+    #: Retry nodes will have a ``kind`` metadata key with this value.
     RETRY = RETRY
 
-    #: Flow nodes will have a ``kind`` attribute/metadata key with this value.
     FLOW = FLOW
+    """
+    Flow **entry** nodes will have a ``kind`` metadata key with
+    this value.
+    """
+
+    FLOW_END = FLOW_END
+    """
+    Flow **exit** nodes will have a ``kind`` metadata key with
+    this value (only applicable for compilation execution graph, not currently
+    used in tree hierarchy).
+    """
 
     def __init__(self, execution_graph, hierarchy):
         self._execution_graph = execution_graph
@@ -104,10 +138,6 @@ def _add_update_edges(graph, nodes_from, nodes_to, attr_dict=None):
 class TaskCompiler(object):
     """Non-recursive compiler of tasks."""
 
-    @staticmethod
-    def handles(obj):
-        return isinstance(obj, task.BaseTask)
-
     def compile(self, task, parent=None):
         graph = gr.DiGraph(name=task.name)
         graph.add_node(task, kind=TASK)
@@ -119,10 +149,6 @@ class TaskCompiler(object):
 
 class FlowCompiler(object):
     """Recursive compiler of flows."""
-
-    @staticmethod
-    def handles(obj):
-        return isinstance(obj, flow.Flow)
 
     def __init__(self, deep_compiler_func):
         self._deep_compiler_func = deep_compiler_func
@@ -148,6 +174,8 @@ class FlowCompiler(object):
             _add_update_edges(graph, u_graph.no_successors_iter(),
                               list(v_graph.no_predecessors_iter()),
                               attr_dict=attr_dict)
+        # Insert the flow(s) retry if needed, and always make sure it
+        # is the **immediate** successor of the flow node itself.
         if flow.retry is not None:
             graph.add_node(flow.retry, kind=RETRY)
             _add_update_edges(graph, [flow], [flow.retry],
@@ -156,20 +184,42 @@ class FlowCompiler(object):
                 if node is not flow.retry and node is not flow:
                     graph.node[node].setdefault(RETRY, flow.retry)
             from_nodes = [flow.retry]
-            connected_attr_dict = {LINK_INVARIANT: True, LINK_RETRY: True}
+            attr_dict = {LINK_INVARIANT: True, LINK_RETRY: True}
         else:
             from_nodes = [flow]
-            connected_attr_dict = {LINK_INVARIANT: True}
-        connected_to = [
-            node for node in graph.no_predecessors_iter() if node is not flow
-        ]
-        if connected_to:
-            # Ensure all nodes in this graph(s) that have no
-            # predecessors depend on this flow (or this flow's retry) so that
-            # we can depend on the flow being traversed before its
-            # children (even though at the current time it will be skipped).
-            _add_update_edges(graph, from_nodes, connected_to,
-                              attr_dict=connected_attr_dict)
+            attr_dict = {LINK_INVARIANT: True}
+        # Ensure all nodes with no predecessors are connected to this flow
+        # or its retry node (so that the invariant that the flow node is
+        # traversed through before its contents is maintained); this allows
+        # us to easily know when we have entered a flow (when running) and
+        # do special and/or smart things such as only traverse up to the
+        # start of a flow when looking for node deciders.
+        _add_update_edges(graph, from_nodes, [
+            node for node in graph.no_predecessors_iter()
+            if node is not flow
+        ], attr_dict=attr_dict)
+        # Connect all nodes with no successors into a special terminator
+        # that is used to identify the end of the flow and ensure that all
+        # execution traversals will traverse over this node before executing
+        # further work (this is especially useful for nesting and knowing
+        # when we have exited a nesting level); it allows us to do special
+        # and/or smart things such as applying deciders up to (but not
+        # beyond) a flow termination point.
+        #
+        # Do note that in a empty flow this will just connect itself to
+        # the flow node itself... and also note we can not use the flow
+        # object itself (primarily because the underlying graph library
+        # uses hashing to identify node uniqueness and we can easily create
+        # a loop if we don't do this correctly, so avoid that by just
+        # creating this special node and tagging it with a special kind); we
+        # may be able to make this better in the future with a multidigraph
+        # that networkx provides??
+        flow_term = Terminator(flow)
+        graph.add_node(flow_term, kind=FLOW_END, noop=True)
+        _add_update_edges(graph, [
+            node for node in graph.no_successors_iter()
+            if node is not flow_term
+        ], [flow_term], attr_dict={LINK_INVARIANT: True})
         return graph, tree_node
 
 
@@ -274,17 +324,20 @@ class PatternCompiler(object):
         self._freeze = freeze
         self._lock = threading.Lock()
         self._compilation = None
-        self._matchers = (FlowCompiler(self._compile), TaskCompiler())
+        self._matchers = [
+            (flow.Flow, FlowCompiler(self._compile)),
+            (task.BaseTask, TaskCompiler()),
+        ]
         self._level = 0
 
     def _compile(self, item, parent=None):
         """Compiles a item (pattern, task) into a graph + tree node."""
-        for m in self._matchers:
-            if m.handles(item):
-                self._pre_item_compile(item)
-                graph, node = m.compile(item, parent=parent)
-                self._post_item_compile(item, graph, node)
-                return graph, node
+        item_compiler = misc.match_type(item, self._matchers)
+        if item_compiler is not None:
+            self._pre_item_compile(item)
+            graph, node = item_compiler.compile(item, parent=parent)
+            self._post_item_compile(item, graph, node)
+            return graph, node
         else:
             raise TypeError("Unknown object '%s' (%s) requested to compile"
                             % (item, type(item)))
@@ -296,23 +349,23 @@ class PatternCompiler(object):
                              " and/or recursive compiling is not"
                              " supported" % (item, type(item)))
         self._history.add(item)
-        if LOG.isEnabledFor(logging.BLATHER):
-            LOG.blather("%sCompiling '%s'", "  " * self._level, item)
+        if LOG.isEnabledFor(logging.TRACE):
+            LOG.trace("%sCompiling '%s'", "  " * self._level, item)
         self._level += 1
 
     def _post_item_compile(self, item, graph, node):
         """Called after a item is compiled; doing post-compilation actions."""
         self._level -= 1
-        if LOG.isEnabledFor(logging.BLATHER):
+        if LOG.isEnabledFor(logging.TRACE):
             prefix = '  ' * self._level
-            LOG.blather("%sDecomposed '%s' into:", prefix, item)
+            LOG.trace("%sDecomposed '%s' into:", prefix, item)
             prefix = '  ' * (self._level + 1)
-            LOG.blather("%sGraph:", prefix)
+            LOG.trace("%sGraph:", prefix)
             for line in graph.pformat().splitlines():
-                LOG.blather("%s  %s", prefix, line)
-            LOG.blather("%sHierarchy:", prefix)
+                LOG.trace("%s  %s", prefix, line)
+            LOG.trace("%sHierarchy:", prefix)
             for line in node.pformat().splitlines():
-                LOG.blather("%s  %s", prefix, line)
+                LOG.trace("%s  %s", prefix, line)
 
     def _pre_compile(self):
         """Called before the compilation of the root starts."""

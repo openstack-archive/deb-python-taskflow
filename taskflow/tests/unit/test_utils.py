@@ -244,24 +244,6 @@ class TestCountdownIter(test.TestCase):
         self.assertRaises(ValueError, six.next, it)
 
 
-class TestLookFor(test.TestCase):
-    def test_no_matches(self):
-        hay = [9, 10, 11]
-        self.assertEqual([], misc.look_for(hay, [1, 2, 3]))
-
-    def test_match_order(self):
-        hay = [6, 5, 4, 3, 2, 1]
-        priors = []
-        for i in range(0, 6):
-            priors.append(i + 1)
-            matches = misc.look_for(hay, priors)
-            self.assertGreater(0, len(matches))
-            self.assertIsSuperAndSubsequence(hay, matches)
-        hay = [10, 1, 15, 3, 5, 8, 44]
-        self.assertEqual([1, 15], misc.look_for(hay, [15, 1]))
-        self.assertEqual([10, 44], misc.look_for(hay, [44, 10]))
-
-
 class TestMergeUri(test.TestCase):
     def test_merge(self):
         url = "http://www.yahoo.com/?a=b&c=d"
@@ -342,7 +324,7 @@ class TestIterable(test.TestCase):
         self.assertTrue(misc.is_iterable(dict()))
 
 
-class TestEnsureDict(testscenarios.TestWithScenarios):
+class TestSafeCopyDict(testscenarios.TestWithScenarios):
     scenarios = [
         ('none', {'original': None, 'expected': {}}),
         ('empty_dict', {'original': {}, 'expected': {}}),
@@ -351,11 +333,18 @@ class TestEnsureDict(testscenarios.TestWithScenarios):
     ]
 
     def test_expected(self):
-        self.assertEqual(self.expected, misc.ensure_dict(self.original))
-        self.assertFalse(self.expected is misc.ensure_dict(self.original))
+        self.assertEqual(self.expected, misc.safe_copy_dict(self.original))
+        self.assertFalse(self.expected is misc.safe_copy_dict(self.original))
+
+    def test_mutated_post_copy(self):
+        a = {"a": "b"}
+        a_2 = misc.safe_copy_dict(a)
+        a['a'] = 'c'
+        self.assertEqual("b", a_2['a'])
+        self.assertEqual("c", a['a'])
 
 
-class TestEnsureDictRaises(testscenarios.TestWithScenarios):
+class TestSafeCopyDictRaises(testscenarios.TestWithScenarios):
     scenarios = [
         ('list', {'original': [1, 2], 'exception': TypeError}),
         ('tuple', {'original': (1, 2), 'exception': TypeError}),
@@ -363,4 +352,4 @@ class TestEnsureDictRaises(testscenarios.TestWithScenarios):
     ]
 
     def test_exceptions(self):
-        self.assertRaises(self.exception, misc.ensure_dict, self.original)
+        self.assertRaises(self.exception, misc.safe_copy_dict, self.original)

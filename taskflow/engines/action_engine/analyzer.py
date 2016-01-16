@@ -14,105 +14,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import abc
-import itertools
+import operator
 import weakref
 
-import six
-
 from taskflow.engines.action_engine import compiler as co
+from taskflow.engines.action_engine import deciders
+from taskflow.engines.action_engine import traversal
+from taskflow import logging
 from taskflow import states as st
 from taskflow.utils import iter_utils
 
-
-def _depth_first_iterate(graph, connected_to_functors, initial_nodes_iter):
-    """Iterates connected nodes in execution graph (from starting set).
-
-    Jumps over nodes with ``noop`` attribute (does not yield them back).
-    """
-    stack = list(initial_nodes_iter)
-    while stack:
-        node = stack.pop()
-        node_attrs = graph.node[node]
-        if not node_attrs.get('noop'):
-            yield node
-        try:
-            node_kind = node_attrs['kind']
-            connected_to_functor = connected_to_functors[node_kind]
-        except KeyError:
-            pass
-        else:
-            stack.extend(connected_to_functor(node))
-
-
-@six.add_metaclass(abc.ABCMeta)
-class Decider(object):
-    """Base class for deciders.
-
-    Provides interface to be implemented by sub-classes
-    Decider checks whether next atom in flow should be executed or not
-    """
-
-    @abc.abstractmethod
-    def check(self, runtime):
-        """Returns bool of whether this decider should allow running."""
-
-    @abc.abstractmethod
-    def affect(self, runtime):
-        """If the :py:func:`~.check` returns false, affects associated atoms.
-
-        """
-
-    def check_and_affect(self, runtime):
-        """Handles :py:func:`~.check` + :py:func:`~.affect` in right order."""
-        proceed = self.check(runtime)
-        if not proceed:
-            self.affect(runtime)
-        return proceed
-
-
-class IgnoreDecider(Decider):
-    """Checks any provided edge-deciders and determines if ok to run."""
-
-    def __init__(self, atom, edge_deciders):
-        self._atom = atom
-        self._edge_deciders = edge_deciders
-
-    def check(self, runtime):
-        """Returns bool of whether this decider should allow running."""
-        # Gather all atoms results so that those results can be used
-        # by the decider(s) that are making a decision as to pass or
-        # not pass...
-        results = {}
-        for node, node_kind, _local_decider in self._edge_deciders:
-            if node_kind in co.ATOMS:
-                results[node.name] = runtime.storage.get(node.name)
-        for _node, _node_kind, local_decider in self._edge_deciders:
-            if not local_decider(history=results):
-                return False
-        return True
-
-    def affect(self, runtime):
-        """If the :py:func:`~.check` returns false, affects associated atoms.
-
-        This will alter the associated atom + successor atoms by setting there
-        state to ``IGNORE`` so that they are ignored in future runtime
-        activities.
-        """
-        successors_iter = runtime.analyzer.iterate_connected_atoms(self._atom)
-        runtime.reset_atoms(itertools.chain([self._atom], successors_iter),
-                            state=st.IGNORE, intention=st.IGNORE)
-
-
-class NoOpDecider(Decider):
-    """No-op decider that says it is always ok to run & has no effect(s)."""
-
-    def check(self, runtime):
-        """Always good to go."""
-        return True
-
-    def affect(self, runtime):
-        """Does nothing."""
+LOG = logging.getLogger(__name__)
 
 
 class Analyzer(object):
@@ -133,14 +45,15 @@ class Analyzer(object):
     def iter_next_atoms(self, atom=None):
         """Iterate next atoms to run (originating from atom or all atoms)."""
         if atom is None:
-            return iter_utils.unique_seen(self.browse_atoms_for_execute(),
-                                          self.browse_atoms_for_revert())
+            return iter_utils.unique_seen((self.browse_atoms_for_execute(),
+                                           self.browse_atoms_for_revert()),
+                                          seen_selector=operator.itemgetter(0))
         state = self._storage.get_atom_state(atom.name)
         intention = self._storage.get_atom_intention(atom.name)
         if state == st.SUCCESS:
             if intention == st.REVERT:
                 return iter([
-                    (atom, NoOpDecider()),
+                    (atom, deciders.NoOpDecider()),
                 ])
             elif intention == st.EXECUTE:
                 return self.browse_atoms_for_execute(atom=atom)
@@ -163,10 +76,15 @@ class Analyzer(object):
         if atom is None:
             atom_it = self.iterate_nodes(co.ATOMS)
         else:
-            successors_iter = self._execution_graph.successors_iter
-            atom_it = _depth_first_iterate(self._execution_graph,
-                                           {co.FLOW: successors_iter},
-                                           successors_iter(atom))
+            # NOTE(harlowja): the reason this uses breadth first is so that
+            # when deciders are applied that those deciders can be applied
+            # from top levels to lower levels since lower levels *may* be
+            # able to run even if top levels have deciders that decide to
+            # ignore some atoms... (going deeper first would make this
+            # problematic to determine as top levels can have their deciders
+            # applied **after** going deeper).
+            atom_it = traversal.breadth_first_iterate(
+                self._execution_graph, atom, traversal.Direction.FORWARD)
         for atom in atom_it:
             is_ready, late_decider = self._get_maybe_ready_for_execute(atom)
             if is_ready:
@@ -183,78 +101,131 @@ class Analyzer(object):
         if atom is None:
             atom_it = self.iterate_nodes(co.ATOMS)
         else:
-            predecessors_iter = self._execution_graph.predecessors_iter
-            atom_it = _depth_first_iterate(self._execution_graph,
-                                           {co.FLOW: predecessors_iter},
-                                           predecessors_iter(atom))
+            atom_it = traversal.breadth_first_iterate(
+                self._execution_graph, atom, traversal.Direction.BACKWARD,
+                # Stop at the retry boundary (as retries 'control' there
+                # surronding atoms, and we don't want to back track over
+                # them so that they can correctly affect there associated
+                # atoms); we do though need to jump through all tasks since
+                # if a predecessor Y was ignored and a predecessor Z before Y
+                # was not it should be eligible to now revert...
+                through_retries=False)
         for atom in atom_it:
             is_ready, late_decider = self._get_maybe_ready_for_revert(atom)
             if is_ready:
                 yield (atom, late_decider)
 
     def _get_maybe_ready(self, atom, transition_to, allowed_intentions,
-                         connected_fetcher, connected_checker,
-                         decider_fetcher):
+                         connected_fetcher, ready_checker,
+                         decider_fetcher, for_what="?"):
+        def iter_connected_states():
+            # Lazily iterate over connected states so that ready checkers
+            # can stop early (vs having to consume and check all the
+            # things...)
+            for atom in connected_fetcher():
+                # TODO(harlowja): make this storage api better, its not
+                # especially clear what the following is doing (mainly
+                # to avoid two calls into storage).
+                atom_states = self._storage.get_atoms_states([atom.name])
+                yield (atom, atom_states[atom.name])
+        # NOTE(harlowja): How this works is the following...
+        #
+        # 1. First check if the current atom can even transition to the
+        #    desired state, if not this atom is definitely not ready to
+        #    execute or revert.
+        # 2. Check if the actual atoms intention is in one of the desired/ok
+        #    intentions, if it is not there we are still not ready to execute
+        #    or revert.
+        # 3. Iterate over (atom, atom_state, atom_intention) for all the
+        #    atoms the 'connected_fetcher' callback yields from underlying
+        #    storage and direct that iterator into the 'ready_checker'
+        #    callback, that callback should then iterate over these entries
+        #    and determine if it is ok to execute or revert.
+        # 4. If (and only if) 'ready_checker' returns true, then
+        #    the 'decider_fetcher' callback is called to get a late decider
+        #    which can (if it desires) affect this ready result (but does
+        #    so right before the atom is about to be scheduled).
         state = self._storage.get_atom_state(atom.name)
         ok_to_transition = self._runtime.check_atom_transition(atom, state,
                                                                transition_to)
         if not ok_to_transition:
+            LOG.trace("Atom '%s' is not ready to %s since it can not"
+                      " transition to %s from its current state %s",
+                      atom, for_what, transition_to, state)
             return (False, None)
         intention = self._storage.get_atom_intention(atom.name)
         if intention not in allowed_intentions:
+            LOG.trace("Atom '%s' is not ready to %s since its current"
+                      " intention %s is not in allowed intentions %s",
+                      atom, for_what, intention, allowed_intentions)
             return (False, None)
-        connected_states = self._storage.get_atoms_states(
-            connected_atom.name for connected_atom in connected_fetcher(atom))
-        ok_to_run = connected_checker(six.itervalues(connected_states))
+        ok_to_run = ready_checker(iter_connected_states())
         if not ok_to_run:
             return (False, None)
         else:
-            return (True, decider_fetcher(atom))
+            return (True, decider_fetcher())
 
     def _get_maybe_ready_for_execute(self, atom):
         """Returns if an atom is *likely* ready to be executed."""
-        def decider_fetcher(atom):
-            edge_deciders = self._runtime.fetch_edge_deciders(atom)
-            if edge_deciders:
-                return IgnoreDecider(atom, edge_deciders)
-            else:
-                return NoOpDecider()
-        predecessors_iter = self._execution_graph.predecessors_iter
-        connected_fetcher = lambda atom: \
-            _depth_first_iterate(self._execution_graph,
-                                 {co.FLOW: predecessors_iter},
-                                 predecessors_iter(atom))
-        connected_checker = lambda connected_iter: \
-            all(state == st.SUCCESS and intention == st.EXECUTE
-                for state, intention in connected_iter)
+        def ready_checker(pred_connected_it):
+            for pred in pred_connected_it:
+                pred_atom, (pred_atom_state, pred_atom_intention) = pred
+                if (pred_atom_state in (st.SUCCESS, st.IGNORE) and
+                        pred_atom_intention in (st.EXECUTE, st.IGNORE)):
+                    continue
+                LOG.trace("Unable to begin to execute since predecessor"
+                          " atom '%s' is in state %s with intention %s",
+                          pred_atom, pred_atom_state, pred_atom_intention)
+                return False
+            LOG.trace("Able to let '%s' execute", atom)
+            return True
+        decider_fetcher = lambda: \
+            deciders.IgnoreDecider(
+                atom, self._runtime.fetch_edge_deciders(atom))
+        connected_fetcher = lambda: \
+            traversal.depth_first_iterate(self._execution_graph, atom,
+                                          # Whether the desired atom
+                                          # can execute is dependent on its
+                                          # predecessors outcomes (thus why
+                                          # we look backwards).
+                                          traversal.Direction.BACKWARD)
+        # If this atoms current state is able to be transitioned to RUNNING
+        # and its intention is to EXECUTE and all of its predecessors executed
+        # successfully or were ignored then this atom is ready to execute.
+        LOG.trace("Checking if '%s' is ready to execute", atom)
         return self._get_maybe_ready(atom, st.RUNNING, [st.EXECUTE],
-                                     connected_fetcher, connected_checker,
-                                     decider_fetcher)
+                                     connected_fetcher, ready_checker,
+                                     decider_fetcher, for_what='execute')
 
     def _get_maybe_ready_for_revert(self, atom):
         """Returns if an atom is *likely* ready to be reverted."""
-        successors_iter = self._execution_graph.successors_iter
-        connected_fetcher = lambda atom: \
-            _depth_first_iterate(self._execution_graph,
-                                 {co.FLOW: successors_iter},
-                                 successors_iter(atom))
-        connected_checker = lambda connected_iter: \
-            all(state in (st.PENDING, st.REVERTED)
-                for state, _intention in connected_iter)
-        decider_fetcher = lambda atom: NoOpDecider()
+        def ready_checker(succ_connected_it):
+            for succ in succ_connected_it:
+                succ_atom, (succ_atom_state, _succ_atom_intention) = succ
+                if succ_atom_state not in (st.PENDING, st.REVERTED, st.IGNORE):
+                    LOG.trace("Unable to begin to revert since successor"
+                              " atom '%s' is in state %s", succ_atom,
+                              succ_atom_state)
+                    return False
+            LOG.trace("Able to let '%s' revert", atom)
+            return True
+        noop_decider = deciders.NoOpDecider()
+        connected_fetcher = lambda: \
+            traversal.depth_first_iterate(self._execution_graph, atom,
+                                          # Whether the desired atom
+                                          # can revert is dependent on its
+                                          # successors states (thus why we
+                                          # look forwards).
+                                          traversal.Direction.FORWARD)
+        decider_fetcher = lambda: noop_decider
+        # If this atoms current state is able to be transitioned to REVERTING
+        # and its intention is either REVERT or RETRY and all of its
+        # successors are either PENDING or REVERTED then this atom is ready
+        # to revert.
+        LOG.trace("Checking if '%s' is ready to revert", atom)
         return self._get_maybe_ready(atom, st.REVERTING, [st.REVERT, st.RETRY],
-                                     connected_fetcher, connected_checker,
-                                     decider_fetcher)
-
-    def iterate_connected_atoms(self, atom):
-        """Iterates **all** successor atoms connected to given atom."""
-        successors_iter = self._execution_graph.successors_iter
-        return _depth_first_iterate(
-            self._execution_graph, {
-                co.FLOW: successors_iter,
-                co.TASK: successors_iter,
-                co.RETRY: successors_iter,
-            }, successors_iter(atom))
+                                     connected_fetcher, ready_checker,
+                                     decider_fetcher, for_what='revert')
 
     def iterate_retries(self, state=None):
         """Iterates retry atoms that match the provided state.
@@ -266,7 +237,8 @@ class Analyzer(object):
             atom_states = self._storage.get_atoms_states(atom.name
                                                          for atom in atoms)
             for atom in atoms:
-                if atom_states[atom.name][0] == state:
+                atom_state, _atom_intention = atom_states[atom.name]
+                if atom_state == state:
                     yield atom
         else:
             for atom in self.iterate_nodes((co.RETRY,)):
@@ -288,7 +260,7 @@ class Analyzer(object):
         atom_states = self._storage.get_atoms_states(atom.name
                                                      for atom in atoms)
         for atom in atoms:
-            atom_state = atom_states[atom.name][0]
+            atom_state, _atom_intention = atom_states[atom.name]
             if atom_state == st.IGNORE:
                 continue
             if atom_state != st.SUCCESS:

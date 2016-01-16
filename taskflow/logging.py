@@ -18,13 +18,18 @@ from __future__ import absolute_import
 
 import logging
 
+from debtcollector import moves
+
 _BASE = __name__.split(".", 1)[0]
 
-# Add a BLATHER level, this matches the multiprocessing utils.py module (and
-# kazoo and others) that declares a similar level, this level is for
-# information that is even lower level than regular DEBUG and gives out so
-# much runtime information that it is only useful by low-level/certain users...
+# Add a BLATHER/TRACE level, this matches the multiprocessing
+# utils.py module (and oslo.log, kazoo and others) that declares a similar
+# level, this level is for information that is even lower level than regular
+# DEBUG and gives out so much runtime information that it is only
+# useful by low-level/certain users...
 BLATHER = 5
+TRACE = BLATHER
+
 
 # Copy over *select* attributes to make it easy to use this module.
 CRITICAL = logging.CRITICAL
@@ -37,11 +42,16 @@ WARN = logging.WARN
 WARNING = logging.WARNING
 
 
-class _BlatherLoggerAdapter(logging.LoggerAdapter):
+class _TraceLoggerAdapter(logging.LoggerAdapter):
 
+    @moves.moved_method("trace", version="1.26.0", removal_version="?")
     def blather(self, msg, *args, **kwargs):
         """Delegate a blather call to the underlying logger."""
         self.log(BLATHER, msg, *args, **kwargs)
+
+    def trace(self, msg, *args, **kwargs):
+        """Delegate a trace call to the underlying logger."""
+        self.log(TRACE, msg, *args, **kwargs)
 
     def warn(self, msg, *args, **kwargs):
         """Delegate a warning call to the underlying logger."""
@@ -52,4 +62,4 @@ def getLogger(name=_BASE, extra=None):
     logger = logging.getLogger(name)
     if not logger.handlers:
         logger.addHandler(logging.NullHandler())
-    return _BlatherLoggerAdapter(logger, extra=extra)
+    return _TraceLoggerAdapter(logger, extra=extra)

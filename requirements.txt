@@ -11,10 +11,10 @@ pbr>=1.6
 six>=1.9.0
 
 # Enum library made for <= python 3.3
-enum34;python_version=='2.7' or python_version=='2.6'
+enum34;python_version=='2.7' or python_version=='2.6' or python_version=='3.3'
 
 # For async and/or periodic work
-futurist>=0.1.2 # Apache-2.0
+futurist>=0.6.0 # Apache-2.0
 
 # For reader/writer + interprocess locks.
 fasteners>=0.7 # Apache-2.0
@@ -41,8 +41,9 @@ jsonschema!=2.5.0,<3.0.0,>=2.0.0
 automaton>=0.5.0 # Apache-2.0
 
 # For common utilities
-oslo.utils>=2.8.0 # Apache-2.0
+oslo.utils>=3.2.0 # Apache-2.0
 oslo.serialization>=1.10.0 # Apache-2.0
+retrying!=1.3.0,>=1.2.3 # Apache-2.0
 
 # For lru caches and such
 cachetools>=1.0.0 # MIT License

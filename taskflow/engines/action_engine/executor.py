@@ -193,9 +193,9 @@ class _WaitWorkItem(object):
                 watch = timeutils.StopWatch()
                 watch.start()
                 self._barrier.wait()
-                LOG.blather("Waited %s seconds until task '%s' %s emitted"
-                            " notifications were depleted", watch.elapsed(),
-                            self._task, sent_events)
+                LOG.trace("Waited %s seconds until task '%s' %s emitted"
+                          " notifications were depleted", watch.elapsed(),
+                          self._task, sent_events)
 
     def __call__(self):
         args = self._args
@@ -270,11 +270,11 @@ class _Dispatcher(object):
         else:
             # Just incase set the barrier to unblock any worker...
             target.barrier.set()
-            if LOG.isEnabledFor(logging.BLATHER):
-                LOG.blather("Dispatched %s messages %s to target '%s' during"
-                            " the lifetime of its existence in the dispatcher",
-                            sum(six.itervalues(target.dispatched)),
-                            dict(target.dispatched), target)
+            if LOG.isEnabledFor(logging.TRACE):
+                LOG.trace("Dispatched %s messages %s to target '%s' during"
+                          " the lifetime of its existence in the dispatcher",
+                          sum(six.itervalues(target.dispatched)),
+                          dict(target.dispatched), target)
 
     def reset(self):
         self._stop_when_empty = False
@@ -289,12 +289,12 @@ class _Dispatcher(object):
         self._dead.set()
 
     def _dispatch(self, message):
-        if LOG.isEnabledFor(logging.BLATHER):
-            LOG.blather("Dispatching message %s (it took %s seconds"
-                        " for it to arrive for processing after being"
-                        " sent)", message,
-                        timeutils.delta_seconds(message['sent_on'],
-                                                timeutils.utcnow()))
+        if LOG.isEnabledFor(logging.TRACE):
+            LOG.trace("Dispatching message %s (it took %s seconds"
+                      " for it to arrive for processing after being"
+                      " sent)", message,
+                      timeutils.delta_seconds(message['sent_on'],
+                                              timeutils.utcnow()))
         try:
             kind = message['kind']
             sender = message['sender']
@@ -425,8 +425,15 @@ class ParallelTaskExecutor(TaskExecutor):
     to concurrent.Futures.Executor.
     """
 
-    #: Options this executor supports (passed in from engine options).
-    OPTIONS = frozenset(['max_workers'])
+    constructor_options = [
+        ('max_workers', lambda v: v if v is None else int(v)),
+    ]
+    """
+    Optional constructor keyword arguments this executor supports. These will
+    typically be passed via engine options (by a engine user) and converted
+    into the correct type before being sent into this
+    classes ``__init__`` method.
+    """
 
     def __init__(self, executor=None, max_workers=None):
         self._executor = executor
@@ -481,8 +488,16 @@ class ParallelProcessTaskExecutor(ParallelTaskExecutor):
     the parent are executed on events in the child.
     """
 
-    #: Options this executor supports (passed in from engine options).
-    OPTIONS = frozenset(['max_workers', 'dispatch_periodicity'])
+    constructor_options = [
+        ('max_workers', lambda v: v if v is None else int(v)),
+        ('dispatch_periodicity', lambda v: v if v is None else float(v)),
+    ]
+    """
+    Optional constructor keyword arguments this executor supports. These will
+    typically be passed via engine options (by a engine user) and converted
+    into the correct type before being sent into this
+    classes ``__init__`` method.
+    """
 
     def __init__(self, executor=None, max_workers=None,
                  dispatch_periodicity=None):

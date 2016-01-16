@@ -285,16 +285,18 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
         self._emit_notifications = bool(emit_notifications)
         self._connected = False
 
-    def _emit(self, state, details):
+    def _try_emit(self, state, details):
         # Submit the work to the executor to avoid blocking the kazoo threads
         # and queue(s)...
         worker = self._worker
-        if worker is None:
+        if worker is None or not self._emit_notifications:
+            # Worker has been destroyed or we aren't supposed to emit anything
+            # in the first place...
             return
         try:
             worker.submit(self.notifier.notify, state, details)
         except RuntimeError:
-            # Notification thread is shutdown just skip submitting a
+            # Notification thread is/was shutdown just skip submitting a
             # notification...
             pass
 
@@ -353,7 +355,7 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
             job = self._known_jobs.pop(path, None)
         if job is not None:
             LOG.debug("Removed job that was at path '%s'", path)
-            self._emit(base.REMOVAL, details={'job': job})
+            self._try_emit(base.REMOVAL, details={'job': job})
 
     def _process_child(self, path, request):
         """Receives the result of a child data fetch request."""
@@ -393,7 +395,7 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
                     self._known_jobs[path] = job
                     self._job_cond.notify_all()
         if job is not None:
-            self._emit(base.POSTED, details={'job': job})
+            self._try_emit(base.POSTED, details={'job': job})
 
     def _on_job_posting(self, children, delayed=True):
         LOG.debug("Got children %s under path %s", children, self.path)
@@ -404,7 +406,6 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
                 # Skip lock paths or non-job-paths (these are not valid jobs)
                 continue
             child_paths.append(k_paths.join(self.path, c))
-
         # Figure out what we really should be investigating and what we
         # shouldn't (remove jobs that exist in our local version, but don't
         # exist in the children anymore) and accumulate all paths that we
@@ -465,7 +466,7 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
             with self._job_cond:
                 self._known_jobs[job_path] = job
                 self._job_cond.notify_all()
-            self._emit(base.POSTED, details={'job': job})
+            self._try_emit(base.POSTED, details={'job': job})
             return job
 
     @base.check_who
@@ -569,14 +570,29 @@ class ZookeeperJobBoard(base.NotifyingJobBoard):
         entity_type = entity.kind
         if entity_type == c_base.Conductor.ENTITY_KIND:
             entity_path = k_paths.join(self.entity_path, entity_type)
-            self._client.ensure_path(entity_path)
-
-            conductor_name = entity.name
-            self._client.create(k_paths.join(entity_path,
-                                             conductor_name),
-                                value=misc.binary_encode(
-                                    jsonutils.dumps(entity.to_dict())),
-                                ephemeral=True)
+            try:
+                self._client.ensure_path(entity_path)
+                self._client.create(k_paths.join(entity_path, entity.name),
+                                    value=misc.binary_encode(
+                                        jsonutils.dumps(entity.to_dict())),
+                                    ephemeral=True)
+            except k_exceptions.NodeExistsError:
+                pass
+            except self._client.handler.timeout_exception:
+                excp.raise_with_cause(
+                    excp.JobFailure,
+                    "Can not register entity %s under %s, operation"
+                    " timed out" % (entity.name, entity_path))
+            except k_exceptions.SessionExpiredError:
+                excp.raise_with_cause(
+                    excp.JobFailure,
+                    "Can not register entity %s under %s, session"
+                    " expired" % (entity.name, entity_path))
+            except k_exceptions.KazooException:
+                excp.raise_with_cause(
+                    excp.JobFailure,
+                    "Can not register entity %s under %s, internal"
+                    " error" % (entity.name, entity_path))
         else:
             raise excp.NotImplementedError(
                 "Not implemented for other entity type '%s'" % entity_type)

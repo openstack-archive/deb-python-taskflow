@@ -35,7 +35,6 @@ from oslo_utils import importutils
 from oslo_utils import netutils
 from oslo_utils import reflection
 import six
-from six.moves import range as compat_range
 
 from taskflow.types import failure
 from taskflow.types import notifier
@@ -110,6 +109,19 @@ def countdown_iter(start_at, decr=1):
     while start_at > 0:
         yield start_at
         start_at -= decr
+
+
+def extract_driver_and_conf(conf, conf_key):
+    """Common function to get a driver name and its configuration."""
+    if isinstance(conf, six.string_types):
+        conf = {conf_key: conf}
+    maybe_uri = conf[conf_key]
+    try:
+        uri = parse_uri(maybe_uri)
+    except (TypeError, ValueError):
+        return (maybe_uri, conf)
+    else:
+        return (uri.scheme, merge_uri(uri, conf.copy()))
 
 
 def reverse_enumerate(items):
@@ -212,37 +224,6 @@ def parse_uri(uri):
         raise ValueError("Uri '%s' does not start with a RFC 3986 compliant"
                          " scheme" % (uri))
     return netutils.urlsplit(uri)
-
-
-def look_for(haystack, needles, extractor=None):
-    """Find items in haystack and returns matches found (in haystack order).
-
-    Given a list of items (the haystack) and a list of items to look for (the
-    needles) this will look for the needles in the haystack and returns
-    the found needles (if any). The ordering of the returned needles is in the
-    order they are located in the haystack.
-
-    Example input and output:
-
-    >>> from taskflow.utils import misc
-    >>> hay = [3, 2, 1]
-    >>> misc.look_for(hay, [1, 2])
-    [2, 1]
-    """
-    if not haystack:
-        return []
-    if extractor is None:
-        extractor = lambda v: v
-    matches = []
-    for i, v in enumerate(needles):
-        try:
-            matches.append((haystack.index(extractor(v)), i))
-        except ValueError:
-            pass
-    if not matches:
-        return []
-    else:
-        return [needles[i] for (_hay_i, i) in sorted(matches)]
 
 
 def disallow_when_frozen(excp_cls):
@@ -452,29 +433,6 @@ def sequence_minus(seq1, seq2):
     return result
 
 
-class ExponentialBackoff(object):
-    """An iterable object that will yield back an exponential delay sequence.
-
-    This objects provides for a configurable exponent, count of numbers
-    to generate, and a maximum number that will be returned. This object may
-    also be iterated over multiple times (yielding the same sequence each
-    time).
-    """
-    def __init__(self, count, exponent=2, max_backoff=3600):
-        self.count = max(0, int(count))
-        self.exponent = exponent
-        self.max_backoff = max(0, int(max_backoff))
-
-    def __iter__(self):
-        if self.count <= 0:
-            raise StopIteration()
-        for i in compat_range(0, self.count):
-            yield min(self.exponent ** i, self.max_backoff)
-
-    def __str__(self):
-        return "ExponentialBackoff: %s" % ([str(v) for v in self])
-
-
 def as_int(obj, quiet=False):
     """Converts an arbitrary value into a integer."""
     # Try "2" -> 2
@@ -584,8 +542,13 @@ def is_iterable(obj):
             isinstance(obj, collections.Iterable))
 
 
-def ensure_dict(obj):
-    """Copy an existing dictionary or default to empty dict...."""
+def safe_copy_dict(obj):
+    """Copy an existing dictionary or default to empty dict...
+
+    This will return a empty dict if given object is falsey, otherwise it
+    will create a dict of the given object (which if provided a dictionary
+    object will make a shallow copy of that object).
+    """
     if not obj:
         return {}
     # default to a shallow copy to avoid most ownership issues

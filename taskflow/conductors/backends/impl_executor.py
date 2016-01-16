@@ -37,17 +37,6 @@ from taskflow.utils import misc
 LOG = logging.getLogger(__name__)
 
 
-def _convert_to_timeout(value=None, default_value=None, event_factory=None):
-    if value is None:
-        value = default_value
-    if isinstance(value, (int, float) + six.string_types):
-        return tt.Timeout(float(value), event_factory=event_factory)
-    elif isinstance(value, tt.Timeout):
-        return value
-    else:
-        raise ValueError("Invalid timeout literal '%s'" % (value))
-
-
 @six.add_metaclass(abc.ABCMeta)
 class ExecutorConductor(base.Conductor):
     """Dispatches jobs from blocking :py:meth:`.run` method to some executor.
@@ -129,7 +118,7 @@ class ExecutorConductor(base.Conductor):
         super(ExecutorConductor, self).__init__(
             name, jobboard, persistence=persistence,
             engine=engine, engine_options=engine_options)
-        self._wait_timeout = _convert_to_timeout(
+        self._wait_timeout = tt.convert_to_timeout(
             value=wait_timeout, default_value=self.WAIT_TIMEOUT,
             event_factory=self._event_factory)
         self._dead = self._event_factory()
@@ -183,22 +172,19 @@ class ExecutorConductor(base.Conductor):
                 stack.enter_context(listener)
             self._log.debug("Dispatching engine for job '%s'", job)
             consume = True
+            details = {
+                'job': job,
+                'engine': engine,
+                'conductor': self,
+            }
             try:
                 for stage_func, event_name in [(engine.compile, 'compilation'),
                                                (engine.prepare, 'preparation'),
                                                (engine.validate, 'validation'),
                                                (engine.run, 'running')]:
-                    self._notifier.notify("%s_start" % event_name, {
-                        'job': job,
-                        'engine': engine,
-                        'conductor': self,
-                    })
+                    self._notifier.notify("%s_start" % event_name,  details)
                     stage_func()
-                    self._notifier.notify("%s_end" % event_name, {
-                        'job': job,
-                        'engine': engine,
-                        'conductor': self,
-                    })
+                    self._notifier.notify("%s_end" % event_name, details)
             except excp.WrappedFailure as e:
                 if all((f.check(*self.NO_CONSUME_EXCEPTIONS) for f in e)):
                     consume = False
