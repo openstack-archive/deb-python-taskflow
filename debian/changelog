@@ -1,8 +1,13 @@
-python-taskflow (1.26.0-2) UNRELEASED; urgency=medium
+python-taskflow (1.30.0-1) experimental; urgency=medium
 
+  [ Ondřej Nový ]
   * Fixed VCS URLs (https).
 
- -- Ondřej Nový <novy@ondrej.org>  Sun, 28 Feb 2016 15:51:33 +0100
+  [ Thomas Goirand ]
+  * New upstream release.
+  * Fixed (build-)depends for this release.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 04 Mar 2016 04:16:11 +0000
 
 python-taskflow (1.26.0-1) experimental; urgency=medium
 
