@@ -6,6 +6,7 @@ python-taskflow (1.30.0-1) experimental; urgency=medium
   [ Thomas Goirand ]
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Standards-Version: 3.9.7 (no change).
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 04 Mar 2016 04:16:11 +0000
 
