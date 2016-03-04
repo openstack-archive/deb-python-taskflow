@@ -14,39 +14,18 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import abc
-import functools
-import itertools
 import random
 import threading
 
-from futurist import periodics
 from oslo_utils import reflection
 from oslo_utils import timeutils
 import six
 
-from taskflow.engines.worker_based import dispatcher
 from taskflow.engines.worker_based import protocol as pr
 from taskflow import logging
-from taskflow.types import cache as base
-from taskflow.types import notifier
 from taskflow.utils import kombu_utils as ku
 
 LOG = logging.getLogger(__name__)
-
-
-class RequestsCache(base.ExpiringCache):
-    """Represents a thread-safe requests cache."""
-
-    def get_waiting_requests(self, worker):
-        """Get list of waiting requests that the given worker can satisfy."""
-        waiting_requests = []
-        with self._lock:
-            for request in six.itervalues(self._data):
-                if request.state == pr.WAITING \
-                   and worker.performs(request.task):
-                    waiting_requests.append(request)
-        return waiting_requests
 
 
 # TODO(harlowja): this needs to be made better, once
@@ -65,6 +44,7 @@ class TopicWorker(object):
             self.tasks.append(task)
         self.topic = topic
         self.identity = identity
+        self.last_seen = None
 
     def performs(self, task):
         if not isinstance(task, six.string_types):
@@ -97,20 +77,27 @@ class TopicWorker(object):
         return r
 
 
-@six.add_metaclass(abc.ABCMeta)
-class WorkerFinder(object):
-    """Base class for worker finders..."""
+class ProxyWorkerFinder(object):
+    """Requests and receives responses about workers topic+task details."""
 
-    #: Event type emitted when a new worker arrives.
-    WORKER_ARRIVED = 'worker_arrived'
-
-    def __init__(self):
+    def __init__(self, uuid, proxy, topics,
+                 beat_periodicity=pr.NOTIFY_PERIOD,
+                 worker_expiry=pr.EXPIRES_AFTER):
         self._cond = threading.Condition()
-        self.notifier = notifier.RestrictedNotifier([self.WORKER_ARRIVED])
+        self._proxy = proxy
+        self._topics = topics
+        self._workers = {}
+        self._uuid = uuid
+        self._seen_workers = 0
+        self._messages_processed = 0
+        self._messages_published = 0
+        self._worker_expiry = worker_expiry
+        self._watch = timeutils.StopWatch(duration=beat_periodicity)
 
-    @abc.abstractmethod
-    def _total_workers(self):
-        """Returns how many workers are known."""
+    @property
+    def total_workers(self):
+        """Number of workers currently known."""
+        return len(self._workers)
 
     def wait_for_workers(self, workers=1, timeout=None):
         """Waits for geq workers to notify they are ready to do work.
@@ -126,9 +113,9 @@ class WorkerFinder(object):
         watch = timeutils.StopWatch(duration=timeout)
         watch.start()
         with self._cond:
-            while self._total_workers() < workers:
+            while self.total_workers < workers:
                 if watch.expired():
-                    return max(0, workers - self._total_workers())
+                    return max(0, workers - self.total_workers)
                 self._cond.wait(watch.leftover(return_none=True))
             return 0
 
@@ -148,45 +135,37 @@ class WorkerFinder(object):
         else:
             return random.choice(available_workers)
 
-    @abc.abstractmethod
-    def get_worker_for_task(self, task):
-        """Gets a worker that can perform a given task."""
-
-    def clear(self):
-        pass
-
-
-class ProxyWorkerFinder(WorkerFinder):
-    """Requests and receives responses about workers topic+task details."""
-
-    def __init__(self, uuid, proxy, topics):
-        super(ProxyWorkerFinder, self).__init__()
-        self._proxy = proxy
-        self._topics = topics
-        self._workers = {}
-        self._uuid = uuid
-        self._proxy.dispatcher.type_handlers.update({
-            pr.NOTIFY: dispatcher.Handler(
-                self._process_response,
-                validator=functools.partial(pr.Notify.validate,
-                                            response=True)),
-        })
-        self._counter = itertools.count()
+    @property
+    def messages_processed(self):
+        """How many notify response messages have been processed."""
+        return self._messages_processed
 
     def _next_worker(self, topic, tasks, temporary=False):
         if not temporary:
-            return TopicWorker(topic, tasks,
-                               identity=six.next(self._counter))
+            w = TopicWorker(topic, tasks, identity=self._seen_workers)
+            self._seen_workers += 1
+            return w
         else:
             return TopicWorker(topic, tasks)
 
-    @periodics.periodic(pr.NOTIFY_PERIOD, run_immediately=True)
-    def beat(self):
-        """Cyclically called to publish notify message to each topic."""
-        self._proxy.publish(pr.Notify(), self._topics, reply_to=self._uuid)
+    def maybe_publish(self):
+        """Periodically called to publish notify message to each topic.
 
-    def _total_workers(self):
-        return len(self._workers)
+        These messages (especially the responses) are how this find learns
+        about workers and what tasks they can perform (so that we can then
+        match workers to tasks to run).
+        """
+        if self._messages_published == 0:
+            self._proxy.publish(pr.Notify(),
+                                self._topics, reply_to=self._uuid)
+            self._messages_published += 1
+            self._watch.restart()
+        else:
+            if self._watch.expired():
+                self._proxy.publish(pr.Notify(),
+                                    self._topics, reply_to=self._uuid)
+                self._messages_published += 1
+                self._watch.restart()
 
     def _add(self, topic, tasks):
         """Adds/updates a worker for the topic for the given tasks."""
@@ -206,7 +185,7 @@ class ProxyWorkerFinder(WorkerFinder):
         self._workers[topic] = worker
         return (worker, True)
 
-    def _process_response(self, data, message):
+    def process_response(self, data, message):
         """Process notify message sent from remote side."""
         LOG.debug("Started processing notify response message '%s'",
                   ku.DelayedPretty(message))
@@ -217,17 +196,50 @@ class ProxyWorkerFinder(WorkerFinder):
                                                response.tasks)
             if new_or_updated:
                 LOG.debug("Updated worker '%s' (%s total workers are"
-                          " currently known)", worker, self._total_workers())
+                          " currently known)", worker, self.total_workers)
                 self._cond.notify_all()
-        if new_or_updated:
-            self.notifier.notify(self.WORKER_ARRIVED, {'worker': worker})
+            worker.last_seen = timeutils.now()
+            self._messages_processed += 1
 
-    def clear(self):
+    def clean(self):
+        """Cleans out any dead/expired/not responding workers.
+
+        Returns how many workers were removed.
+        """
+        if (not self._workers or
+                (self._worker_expiry is None or self._worker_expiry <= 0)):
+            return 0
+        dead_workers = {}
+        with self._cond:
+            now = timeutils.now()
+            for topic, worker in six.iteritems(self._workers):
+                if worker.last_seen is None:
+                    continue
+                secs_since_last_seen = max(0, now - worker.last_seen)
+                if secs_since_last_seen >= self._worker_expiry:
+                    dead_workers[topic] = (worker, secs_since_last_seen)
+            for topic in six.iterkeys(dead_workers):
+                self._workers.pop(topic)
+            if dead_workers:
+                self._cond.notify_all()
+        if dead_workers and LOG.isEnabledFor(logging.INFO):
+            for worker, secs_since_last_seen in six.itervalues(dead_workers):
+                LOG.info("Removed worker '%s' as it has not responded to"
+                         " notification requests in %0.3f seconds",
+                         worker, secs_since_last_seen)
+        return len(dead_workers)
+
+    def reset(self):
+        """Resets finders internal state."""
         with self._cond:
             self._workers.clear()
+            self._messages_processed = 0
+            self._messages_published = 0
+            self._seen_workers = 0
             self._cond.notify_all()
 
     def get_worker_for_task(self, task):
+        """Gets a worker that can perform a given task."""
         available_workers = []
         with self._cond:
             for worker in six.itervalues(self._workers):

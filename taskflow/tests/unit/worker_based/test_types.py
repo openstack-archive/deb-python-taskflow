@@ -16,61 +16,10 @@
 
 from oslo_utils import reflection
 
-from taskflow.engines.worker_based import protocol as pr
 from taskflow.engines.worker_based import types as worker_types
 from taskflow import test
 from taskflow.test import mock
 from taskflow.tests import utils
-
-
-class TestRequestCache(test.TestCase):
-
-    def setUp(self):
-        super(TestRequestCache, self).setUp()
-        self.task = utils.DummyTask()
-        self.task_uuid = 'task-uuid'
-        self.task_action = 'execute'
-        self.task_args = {'a': 'a'}
-        self.timeout = 60
-
-    def request(self, **kwargs):
-        request_kwargs = dict(task=self.task,
-                              uuid=self.task_uuid,
-                              action=self.task_action,
-                              arguments=self.task_args,
-                              progress_callback=None,
-                              timeout=self.timeout)
-        request_kwargs.update(kwargs)
-        return pr.Request(**request_kwargs)
-
-    @mock.patch('oslo_utils.timeutils.now')
-    def test_requests_cache_expiry(self, now):
-        # Mock out the calls the underlying objects will soon use to return
-        # times that we can control more easily...
-        overrides = [
-            0,
-            1,
-            self.timeout + 1,
-        ]
-        now.side_effect = overrides
-
-        cache = worker_types.RequestsCache()
-        cache[self.task_uuid] = self.request()
-        cache.cleanup()
-        self.assertEqual(1, len(cache))
-        cache.cleanup()
-        self.assertEqual(0, len(cache))
-
-    def test_requests_cache_match(self):
-        cache = worker_types.RequestsCache()
-        cache[self.task_uuid] = self.request()
-        cache['task-uuid-2'] = self.request(task=utils.NastyTask(),
-                                            uuid='task-uuid-2')
-        worker = worker_types.TopicWorker("dummy-topic", [utils.DummyTask],
-                                          identity="dummy")
-        matches = cache.get_waiting_requests(worker)
-        self.assertEqual(1, len(matches))
-        self.assertEqual(2, len(cache))
 
 
 class TestTopicWorker(test.TestCase):
@@ -84,12 +33,24 @@ class TestTopicWorker(test.TestCase):
 
 
 class TestProxyFinder(test.TestCase):
+
+    @mock.patch("oslo_utils.timeutils.now")
+    def test_expiry(self, mock_now):
+        finder = worker_types.ProxyWorkerFinder('me', mock.MagicMock(), [],
+                                                worker_expiry=60)
+        w, emit = finder._add('dummy-topic', [utils.DummyTask])
+        w.last_seen = 0
+        mock_now.side_effect = [120]
+        gone = finder.clean()
+        self.assertEqual(0, finder.total_workers)
+        self.assertEqual(1, gone)
+
     def test_single_topic_worker(self):
         finder = worker_types.ProxyWorkerFinder('me', mock.MagicMock(), [])
         w, emit = finder._add('dummy-topic', [utils.DummyTask])
         self.assertIsNotNone(w)
         self.assertTrue(emit)
-        self.assertEqual(1, finder._total_workers())
+        self.assertEqual(1, finder.total_workers)
         w2 = finder.get_worker_for_task(utils.DummyTask)
         self.assertEqual(w.identity, w2.identity)
 
@@ -111,7 +72,7 @@ class TestProxyFinder(test.TestCase):
         added.append(finder._add('dummy-topic', [utils.DummyTask]))
         added.append(finder._add('dummy-topic-2', [utils.DummyTask]))
         added.append(finder._add('dummy-topic-3', [utils.NastyTask]))
-        self.assertEqual(3, finder._total_workers())
+        self.assertEqual(3, finder.total_workers)
         w = finder.get_worker_for_task(utils.NastyTask)
         self.assertEqual(added[-1][0].identity, w.identity)
         w = finder.get_worker_for_task(utils.DummyTask)

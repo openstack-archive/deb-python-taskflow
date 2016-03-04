@@ -20,6 +20,7 @@ import threading
 
 import fasteners
 import futurist
+from oslo_serialization import jsonutils
 from oslo_utils import reflection
 from oslo_utils import timeutils
 import six
@@ -92,12 +93,30 @@ QUEUE_EXPIRE_TIMEOUT = REQUEST_TIMEOUT
 # Workers notify period.
 NOTIFY_PERIOD = 5
 
+# When a worker hasn't notified in this many seconds, it will get expired from
+# being used/targeted for further work.
+EXPIRES_AFTER = 60
+
 # Message types.
 NOTIFY = 'NOTIFY'
 REQUEST = 'REQUEST'
 RESPONSE = 'RESPONSE'
 
+# Object that denotes nothing (none can actually be valid).
+NO_RESULT = object()
+
 LOG = logging.getLogger(__name__)
+
+
+def failure_to_dict(failure):
+    failure_dict = failure.to_dict()
+    try:
+        # it's possible the exc_args can't be serialized as JSON
+        # if that's the case, just get the failure without them
+        jsonutils.dumps(failure_dict)
+        return failure_dict
+    except (TypeError, ValueError):
+        return failure.to_dict(include_args=False)
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -240,44 +259,26 @@ class Request(Message):
         'required': ['task_cls', 'task_name', 'task_version', 'action'],
     }
 
-    def __init__(self, task, uuid, action, arguments, timeout, **kwargs):
-        self._task = task
-        self._uuid = uuid
+    def __init__(self, task, uuid, action,
+                 arguments, timeout=REQUEST_TIMEOUT, result=NO_RESULT,
+                 failures=None):
         self._action = action
         self._event = ACTION_TO_EVENT[action]
         self._arguments = arguments
-        self._kwargs = kwargs
+        self._result = result
+        self._failures = failures
         self._watch = timeutils.StopWatch(duration=timeout).start()
-        self._state = WAITING
         self._lock = threading.Lock()
-        self._created_on = timeutils.utcnow()
-        self._result = futurist.Future()
-        self._result.atom = task
-        self._notifier = task.notifier
+        self.state = WAITING
+        self.task = task
+        self.uuid = uuid
+        self.created_on = timeutils.now()
+        self.future = futurist.Future()
+        self.future.atom = task
 
-    @property
-    def result(self):
-        return self._result
-
-    @property
-    def notifier(self):
-        return self._notifier
-
-    @property
-    def uuid(self):
-        return self._uuid
-
-    @property
-    def task(self):
-        return self._task
-
-    @property
-    def state(self):
-        return self._state
-
-    @property
-    def created_on(self):
-        return self._created_on
+    def set_result(self, result):
+        """Sets the responses futures result."""
+        self.future.set_result((self._event, result))
 
     @property
     def expired(self):
@@ -290,7 +291,7 @@ class Request(Message):
         state for more then the given timeout (it is not considered to be
         expired in any other state).
         """
-        if self._state in WAITING_STATES:
+        if self.state in WAITING_STATES:
             return self._watch.expired()
         return False
 
@@ -302,27 +303,23 @@ class Request(Message):
         then be reconstituted by the receiver).
         """
         request = {
-            'task_cls': reflection.get_class_name(self._task),
-            'task_name': self._task.name,
-            'task_version': self._task.version,
+            'task_cls': reflection.get_class_name(self.task),
+            'task_name': self.task.name,
+            'task_version': self.task.version,
             'action': self._action,
             'arguments': self._arguments,
         }
-        if 'result' in self._kwargs:
-            result = self._kwargs['result']
+        if self._result is not NO_RESULT:
+            result = self._result
             if isinstance(result, ft.Failure):
-                request['result'] = ('failure', result.to_dict())
+                request['result'] = ('failure', failure_to_dict(result))
             else:
                 request['result'] = ('success', result)
-        if 'failures' in self._kwargs:
-            failures = self._kwargs['failures']
+        if self._failures:
             request['failures'] = {}
-            for task, failure in six.iteritems(failures):
-                request['failures'][task] = failure.to_dict()
+            for atom_name, failure in six.iteritems(self._failures):
+                request['failures'][atom_name] = failure_to_dict(failure)
         return request
-
-    def set_result(self, result):
-        self.result.set_result((self._event, result))
 
     def transition_and_log_error(self, new_state, logger=None):
         """Transitions *and* logs an error if that transitioning raises.
@@ -353,7 +350,7 @@ class Request(Message):
         valid (and will not be performed), it raises an InvalidState
         exception.
         """
-        old_state = self._state
+        old_state = self.state
         if old_state == new_state:
             return False
         pair = (old_state, new_state)
@@ -362,7 +359,7 @@ class Request(Message):
                                     " not allowed" % pair)
         if new_state in _STOP_TIMER_STATES:
             self._watch.stop()
-        self._state = new_state
+        self.state = new_state
         LOG.debug("Transitioned '%s' from %s state to %s state", self,
                   old_state, new_state)
         return True
@@ -491,8 +488,8 @@ class Response(Message):
     }
 
     def __init__(self, state, **data):
-        self._state = state
-        self._data = data
+        self.state = state
+        self.data = data
 
     @classmethod
     def from_dict(cls, data):
@@ -502,16 +499,8 @@ class Response(Message):
             data['result'] = ft.Failure.from_dict(data['result'])
         return cls(state, **data)
 
-    @property
-    def state(self):
-        return self._state
-
-    @property
-    def data(self):
-        return self._data
-
     def to_dict(self):
-        return dict(state=self._state, data=self._data)
+        return dict(state=self.state, data=self.data)
 
     @classmethod
     def validate(cls, data):

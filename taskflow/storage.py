@@ -180,10 +180,10 @@ class _ProviderLocator(object):
                                 " produced by %s but was unable to get at"
                                 " that providers results" % (looking_for, p))
                         else:
-                            LOG.blather("Avoiding using the results of"
-                                        " %r (from %s) for name %r because"
-                                        " it was ignored", p.name, p,
-                                        looking_for)
+                            LOG.trace("Avoiding using the results of"
+                                      " %r (from %s) for name %r because"
+                                      " it was ignored", p.name, p,
+                                      looking_for)
                     else:
                         tmp_providers_and_results.append((p, provider_results))
             if tmp_providers_and_results and short_circuit:
@@ -422,6 +422,11 @@ class Storage(object):
         """The flow detail uuid this storage unit is associated with."""
         # This never changes (so no read locking needed).
         return self._flowdetail.uuid
+
+    @property
+    def flow_meta(self):
+        """The flow detail metadata this storage unit is associated with."""
+        return self._flowdetail.meta
 
     @property
     def backend(self):
