@@ -82,7 +82,7 @@ Build-Depends-Indep: alembic (>= 0.7.2),
                      python3-zake,
                      subunit,
                      testrepository,
-Standards-Version: 3.9.7
+Standards-Version: 3.9.8
 Vcs-Browser: https://anonscm.debian.org/cgit/openstack/python-taskflow.git/
 Vcs-Git: https://anonscm.debian.org/git/openstack/python-taskflow.git
 Homepage: https://github.com/openstack/taskflow
