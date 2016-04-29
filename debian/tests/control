@@ -1,3 +1,9 @@
+Depends: python-taskflow
+Test-Command: cd "$ADTTMP" ; python -c "import taskflow ; print taskflow"
+
+Depends: python3-taskflow
+Test-Command: cd "$ADTTMP" ; python3 -c "import taskflow ; print(taskflow)"
+
 Tests: python-taskflow
 Depends: @, python-all, testrepository, python-mock, python-testtools, python-kazoo,
  python-kombu, python-zake, python-oslo-serialization, python-oslo-utils, python-oslotest,
