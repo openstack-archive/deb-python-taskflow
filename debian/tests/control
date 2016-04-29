@@ -1,5 +1,5 @@
 Tests: python-taskflow
 Depends: @, python-all, testrepository, python-mock, python-testtools, python-kazoo,
  python-kombu, python-zake, python-oslo-serialization, python-oslo-utils, python-oslotest,
- python-jsonschema
+ python-jsonschema, python-redis, python-sqlalchemy, python-sqlalchemy-utils
 Restrictions: allow-stderr
