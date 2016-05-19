@@ -4,6 +4,7 @@ python-taskflow (1.30.0-3) UNRELEASED; urgency=medium
   * Added missing Debian tests dependencies
   * Added Python module import Debian tests
   * d/rules: Changed UPSTREAM_GIT protocol to https
+  * d/copyright: Changed source URL to https protocol
 
  -- Ondřej Nový <novy@ondrej.org>  Sat, 09 Apr 2016 19:31:18 +0200
 
