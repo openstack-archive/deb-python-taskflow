@@ -25,11 +25,13 @@ import fasteners
 import networkx as nx
 from oslo_utils import excutils
 from oslo_utils import strutils
+from oslo_utils import timeutils
 import six
 
 from taskflow.engines.action_engine import builder
 from taskflow.engines.action_engine import compiler
 from taskflow.engines.action_engine import executor
+from taskflow.engines.action_engine import process_executor
 from taskflow.engines.action_engine import runtime
 from taskflow.engines import base
 from taskflow import exceptions as exc
@@ -116,6 +118,15 @@ class ActionEngine(base.Engine):
     |                      | has a separate retry  |      |            |
     |                      | behavior).            |      |            |
     +----------------------+-----------------------+------+------------+
+    | ``never_resolve``    | When true, instead    | bool | ``False``  |
+    |                      | of reverting          |      |            |
+    |                      | and trying to resolve |      |            |
+    |                      | a atom failure the    |      |            |
+    |                      | engine will skip      |      |            |
+    |                      | reverting and abort   |      |            |
+    |                      | instead of reverting  |      |            |
+    |                      | and/or retrying.      |      |            |
+    +----------------------+-----------------------+------+------------+
     | ``inject_transient`` | When true, values     | bool | ``True``   |
     |                      | that are local to     |      |            |
     |                      | each atoms scope      |      |            |
@@ -161,7 +172,6 @@ class ActionEngine(base.Engine):
         self._compilation = None
         self._compiler = compiler.PatternCompiler(flow)
         self._lock = threading.RLock()
-        self._state_lock = threading.RLock()
         self._storage_ensured = False
         self._validated = False
         # Retries are not *currently* executed out of the engines process
@@ -169,6 +179,9 @@ class ActionEngine(base.Engine):
         self._retry_executor = executor.SerialRetryExecutor()
         self._inject_transient = strutils.bool_from_string(
             self._options.get('inject_transient', True))
+        self._gather_statistics = strutils.bool_from_string(
+            self._options.get('gather_statistics', True))
+        self._statistics = {}
 
     @_pre_check(check_compiled=True,
                 # NOTE(harlowja): We can alter the state of the
@@ -179,6 +192,10 @@ class ActionEngine(base.Engine):
                 check_validated=False)
     def suspend(self):
         self._change_state(states.SUSPENDING)
+
+    @property
+    def statistics(self):
+        return self._statistics
 
     @property
     def compilation(self):
@@ -261,9 +278,17 @@ class ActionEngine(base.Engine):
             maxlen=max(1, self.MAX_MACHINE_STATES_RETAINED))
         with _start_stop(self._task_executor, self._retry_executor):
             self._change_state(states.RUNNING)
+            if self._gather_statistics:
+                self._statistics.clear()
+                w = timeutils.StopWatch()
+                w.start()
+            else:
+                w = None
             try:
                 closed = False
-                machine, memory = self._runtime.builder.build(timeout=timeout)
+                machine, memory = self._runtime.builder.build(
+                    self._statistics, timeout=timeout,
+                    gather_statistics=self._gather_statistics)
                 r = runners.FiniteRunner(machine)
                 for transition in r.run_iter(builder.START):
                     last_transitions.append(transition)
@@ -283,6 +308,13 @@ class ActionEngine(base.Engine):
                         # shop...
                         closed = True
                         self.suspend()
+                    except Exception:
+                        # Capture the failure, and ensure that the
+                        # machine will notice that something externally
+                        # has sent an exception in and that it should
+                        # finish up and reraise.
+                        memory.failures.append(failure.Failure())
+                        closed = True
                     else:
                         if try_suspend:
                             self.suspend()
@@ -306,6 +338,10 @@ class ActionEngine(base.Engine):
                                 six.itervalues(failures),
                                 six.itervalues(more_failures))
                             failure.Failure.reraise_if_any(fails)
+            finally:
+                if w is not None:
+                    w.stop()
+                    self._statistics['active_for'] = w.elapsed()
 
     @staticmethod
     def _check_compilation(compilation):
@@ -326,18 +362,15 @@ class ActionEngine(base.Engine):
         return compilation
 
     def _change_state(self, state):
-        with self._state_lock:
-            old_state = self.storage.get_flow_state()
-            if not states.check_flow_transition(old_state, state):
-                return
-            self.storage.set_flow_state(state)
-        details = {
-            'engine': self,
-            'flow_name': self.storage.flow_name,
-            'flow_uuid': self.storage.flow_uuid,
-            'old_state': old_state,
-        }
-        self.notifier.notify(state, details)
+        moved, old_state = self.storage.change_flow_state(state)
+        if moved:
+            details = {
+                'engine': self,
+                'flow_name': self.storage.flow_name,
+                'flow_uuid': self.storage.flow_uuid,
+                'old_state': old_state,
+            }
+            self.notifier.notify(state, details)
 
     def _ensure_storage(self):
         """Ensure all contained atoms exist in the storage unit."""
@@ -370,16 +403,23 @@ class ActionEngine(base.Engine):
         last_node = None
         missing_nodes = 0
         for atom in self._runtime.analyzer.iterate_nodes(compiler.ATOMS):
-            atom_missing = self.storage.fetch_unsatisfied_args(
+            exec_missing = self.storage.fetch_unsatisfied_args(
                 atom.name, atom.rebind, optional_args=atom.optional)
-            if atom_missing:
-                cause = exc.MissingDependencies(atom,
-                                                sorted(atom_missing),
-                                                cause=last_cause)
-                last_cause = cause
-                last_node = atom
-                missing_nodes += 1
-                missing.update(atom_missing)
+            revert_missing = self.storage.fetch_unsatisfied_args(
+                atom.name, atom.revert_rebind,
+                optional_args=atom.revert_optional)
+            atom_missing = (('execute', exec_missing),
+                            ('revert', revert_missing))
+            for method, method_missing in atom_missing:
+                if method_missing:
+                    cause = exc.MissingDependencies(atom,
+                                                    sorted(method_missing),
+                                                    cause=last_cause,
+                                                    method=method)
+                    last_cause = cause
+                    last_node = atom
+                    missing_nodes += 1
+                    missing.update(method_missing)
         if missing:
             # For when a task is provided (instead of a flow) and that
             # task is the only item in the graph and its missing deps, avoid
@@ -466,7 +506,7 @@ class ParallelActionEngine(ActionEngine):
 Type provided              Executor used
 =========================  ===============================================
 |cft|.ThreadPoolExecutor   :class:`~.executor.ParallelThreadTaskExecutor`
-|cfp|.ProcessPoolExecutor  :class:`~.executor.ParallelProcessTaskExecutor`
+|cfp|.ProcessPoolExecutor  :class:`~.|pe|.ParallelProcessTaskExecutor`
 |cf|._base.Executor        :class:`~.executor.ParallelThreadTaskExecutor`
 =========================  ===============================================
 
@@ -478,18 +518,24 @@ Type provided              Executor used
 ===========================  ===============================================
 String (case insensitive)    Executor used
 ===========================  ===============================================
-``process``                  :class:`~.executor.ParallelProcessTaskExecutor`
-``processes``                :class:`~.executor.ParallelProcessTaskExecutor`
+``process``                  :class:`~.|pe|.ParallelProcessTaskExecutor`
+``processes``                :class:`~.|pe|.ParallelProcessTaskExecutor`
 ``thread``                   :class:`~.executor.ParallelThreadTaskExecutor`
 ``threaded``                 :class:`~.executor.ParallelThreadTaskExecutor`
 ``threads``                  :class:`~.executor.ParallelThreadTaskExecutor`
+``greenthread``              :class:`~.executor.ParallelThreadTaskExecutor`
+                              (greened version)
+``greedthreaded``            :class:`~.executor.ParallelThreadTaskExecutor`
+                              (greened version)
+``greenthreads``             :class:`~.executor.ParallelThreadTaskExecutor`
+                              (greened version)
 ===========================  ===============================================
 
     * ``max_workers``: a integer that will affect the number of parallel
       workers that are used to dispatch tasks into (this number is bounded
       by the maximum parallelization your workflow can support).
 
-    * ``dispatch_periodicity``: a float (in seconds) that will affect the
+    * ``wait_timeout``: a float (in seconds) that will affect the
       parallel process task executor (and therefore is **only** applicable when
       the executor provided above is of the process variant). This number
       affects how much time the process task executor waits for messages from
@@ -498,6 +544,7 @@ String (case insensitive)    Executor used
       polling while a higher number will involve less polling but a slower time
       for an engine to notice a task has completed.
 
+    .. |pe|  replace:: process_executor
     .. |cfp| replace:: concurrent.futures.process
     .. |cft| replace:: concurrent.futures.thread
     .. |cf| replace:: concurrent.futures
@@ -513,7 +560,7 @@ String (case insensitive)    Executor used
         _ExecutorTypeMatch((futures.ThreadPoolExecutor,),
                            executor.ParallelThreadTaskExecutor),
         _ExecutorTypeMatch((futures.ProcessPoolExecutor,),
-                           executor.ParallelProcessTaskExecutor),
+                           process_executor.ParallelProcessTaskExecutor),
         _ExecutorTypeMatch((futures.Executor,),
                            executor.ParallelThreadTaskExecutor),
     ]
@@ -523,9 +570,12 @@ String (case insensitive)    Executor used
     # will be lower-cased before checking).
     _executor_str_matchers = [
         _ExecutorTextMatch(frozenset(['processes', 'process']),
-                           executor.ParallelProcessTaskExecutor),
+                           process_executor.ParallelProcessTaskExecutor),
         _ExecutorTextMatch(frozenset(['thread', 'threads', 'threaded']),
                            executor.ParallelThreadTaskExecutor),
+        _ExecutorTextMatch(frozenset(['greenthread', 'greenthreads',
+                                      'greenthreaded']),
+                           executor.ParallelGreenThreadTaskExecutor),
     ]
 
     # Used when no executor is provided (either a string or object)...

@@ -17,7 +17,6 @@
 
 import abc
 
-from debtcollector import moves
 import six
 
 from taskflow.types import notifier
@@ -30,10 +29,6 @@ class Engine(object):
 
     :ivar notifier: A notification object that will dispatch events that
                     occur related to the flow the engine contains.
-    :ivar task_notifier: A notification object that will dispatch events that
-                         occur related to the tasks the engine contains.
-                         occur related to the tasks the engine
-                         contains (deprecated).
     :ivar atom_notifier: A notification object that will dispatch events that
                          occur related to the atoms the engine contains.
     """
@@ -52,21 +47,6 @@ class Engine(object):
         return self._notifier
 
     @property
-    @moves.moved_property('atom_notifier', version="0.6",
-                          removal_version="2.0")
-    def task_notifier(self):
-        """The task notifier.
-
-        .. deprecated:: 0.6
-
-            The property is **deprecated** and is present for
-            backward compatibility **only**. In order to access this
-            property going forward the :py:attr:`.atom_notifier` should
-            be used instead.
-        """
-        return self._atom_notifier
-
-    @property
     def atom_notifier(self):
         """The atom notifier."""
         return self._atom_notifier
@@ -79,6 +59,22 @@ class Engine(object):
     @abc.abstractproperty
     def storage(self):
         """The storage unit for this engine."""
+
+    @abc.abstractproperty
+    def statistics(self):
+        """A dictionary of runtime statistics this engine has gathered.
+
+        This dictionary will be empty when the engine has never been
+        ran. When it is running or has ran previously it should have (but
+        may not) have useful and/or informational keys and values when
+        running is underway and/or completed.
+
+        .. warning:: The keys in this dictionary **should** be some what
+                     stable (not changing), but there existence **may**
+                     change between major releases as new statistics are
+                     gathered or removed so before accessing keys ensure that
+                     they actually exist and handle when they do not.
+        """
 
     @abc.abstractmethod
     def compile(self):
@@ -135,8 +131,3 @@ class Engine(object):
         not currently be preempted) and move the engine into a suspend state
         which can then later be resumed from.
         """
-
-
-# TODO(harlowja): remove in 0.7 or later...
-EngineBase = moves.moved_class(Engine, 'EngineBase', __name__,
-                               version="0.6", removal_version="2.0")

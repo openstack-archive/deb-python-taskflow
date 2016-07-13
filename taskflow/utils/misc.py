@@ -37,8 +37,6 @@ from oslo_utils import reflection
 import six
 
 from taskflow.types import failure
-from taskflow.types import notifier
-from taskflow.utils import deprecation
 
 
 UNKNOWN_HOSTNAME = "<unknown>"
@@ -66,6 +64,14 @@ class StringIO(six.StringIO):
     def write_nl(self, value, linesep=os.linesep):
         self.write(value)
         self.write(linesep)
+
+
+class BytesIO(six.BytesIO):
+    """Byte buffer with some small additions."""
+
+    def reset(self):
+        self.seek(0)
+        self.truncate()
 
 
 def get_hostname(unknown_hostname=UNKNOWN_HOSTNAME):
@@ -350,8 +356,11 @@ class cachedproperty(object):
     cached property would be stored under '_get_thing' in the self object
     after the first call to 'get_thing' occurs.
     """
-    def __init__(self, fget):
-        self._lock = threading.RLock()
+    def __init__(self, fget=None, require_lock=True):
+        if require_lock:
+            self._lock = threading.RLock()
+        else:
+            self._lock = None
         # If a name is provided (as an argument) then this will be the string
         # to place the cached attribute under if not then it will be the
         # function itself to be wrapped into a property.
@@ -365,10 +374,12 @@ class cachedproperty(object):
             self.__doc__ = None
 
     def __call__(self, fget):
-        # If __init__ received a string then this will be the function to be
-        # wrapped as a property (if __init__ got a function then this will not
-        # be called).
+        # If __init__ received a string or a lock boolean then this will be
+        # the function to be wrapped as a property (if __init__ got a
+        # function then this will not be called).
         self._fget = fget
+        if not self._attr_name:
+            self._attr_name = "_%s" % (fget.__name__)
         self.__doc__ = getattr(fget, '__doc__', None)
         return self
 
@@ -387,13 +398,17 @@ class cachedproperty(object):
         if hasattr(instance, self._attr_name):
             return getattr(instance, self._attr_name)
         else:
-            with self._lock:
-                try:
-                    return getattr(instance, self._attr_name)
-                except AttributeError:
-                    value = self._fget(instance)
-                    setattr(instance, self._attr_name, value)
-                    return value
+            if self._lock is not None:
+                self._lock.acquire()
+            try:
+                return getattr(instance, self._attr_name)
+            except AttributeError:
+                value = self._fget(instance)
+                setattr(instance, self._attr_name, value)
+                return value
+            finally:
+                if self._lock is not None:
+                    self._lock.release()
 
 
 def millis_to_datetime(milliseconds):
@@ -468,16 +483,6 @@ def ensure_tree(path):
                 raise
         else:
             raise
-
-
-Failure = deprecation.moved_proxy_class(failure.Failure,
-                                        'Failure', __name__,
-                                        version="0.6", removal_version="2.0")
-
-
-Notifier = deprecation.moved_proxy_class(notifier.Notifier,
-                                         'Notifier', __name__,
-                                         version="0.6", removal_version="2.0")
 
 
 @contextlib.contextmanager

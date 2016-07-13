@@ -17,6 +17,7 @@
 import contextlib
 import string
 import threading
+import time
 
 import redis
 import six
@@ -186,6 +187,13 @@ class CaptureListener(capturing.CaptureListener):
         return name
 
 
+class MultiProgressingTask(task.Task):
+    def execute(self, progress_chunks):
+        for chunk in progress_chunks:
+            self.update_progress(chunk)
+        return len(progress_chunks)
+
+
 class ProgressingTask(task.Task):
     def execute(self, **kwargs):
         self.update_progress(0.0)
@@ -214,14 +222,6 @@ class TaskWithFailure(task.Task):
 
     def execute(self, **kwargs):
         raise RuntimeError('Woot!')
-
-
-class ProgressingTask(task.Task):
-
-    def execute(self, *args, **kwargs):
-        self.update_progress(0.0)
-        self.update_progress(1.0)
-        return 5
 
 
 class FailingTaskWithOneArg(ProgressingTask):
@@ -330,6 +330,19 @@ class NeverRunningTask(task.Task):
 
     def revert(self, **kwargs):
         assert False, 'This method should not be called'
+
+
+class TaskRevertExtraArgs(task.Task):
+    def execute(self, **kwargs):
+        raise exceptions.ExecutionFailure("We want to force a revert here")
+
+    def revert(self, revert_arg, flow_failures, result, **kwargs):
+        pass
+
+
+class SleepTask(task.Task):
+    def execute(self, duration, **kwargs):
+        time.sleep(duration)
 
 
 class EngineTestBase(object):

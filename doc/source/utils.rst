@@ -13,10 +13,10 @@ Async
 
 .. automodule:: taskflow.utils.async_utils
 
-Deprecation
-~~~~~~~~~~~
+Banner
+~~~~~~
 
-.. automodule:: taskflow.utils.deprecation
+.. automodule:: taskflow.utils.banner
 
 Eventlet
 ~~~~~~~~

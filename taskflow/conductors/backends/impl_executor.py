@@ -24,12 +24,14 @@ except ImportError:
 
 from debtcollector import removals
 from oslo_utils import excutils
+from oslo_utils import timeutils
 import six
 
 from taskflow.conductors import base
 from taskflow import exceptions as excp
 from taskflow.listeners import logging as logging_listener
 from taskflow import logging
+from taskflow import states
 from taskflow.types import timing as tt
 from taskflow.utils import iter_utils
 from taskflow.utils import misc
@@ -63,6 +65,13 @@ class ExecutorConductor(base.Conductor):
     level logger will be used instead).
     """
 
+    REFRESH_PERIODICITY = 30
+    """
+    Every 30 seconds the jobboard will be resynced (if for some reason
+    a watch or set of watches was not received) using the `ensure_fresh`
+    option to ensure this (for supporting jobboard backends only).
+    """
+
     #: Default timeout used to idle/wait when no jobs have been found.
     WAIT_TIMEOUT = 0.5
 
@@ -86,19 +95,6 @@ class ExecutorConductor(base.Conductor):
     _event_factory = threading.Event
     """This attribute *can* be overridden by subclasses (for example if
        an eventlet *green* event works better for the conductor user)."""
-
-    START_FINISH_EVENTS_EMITTED = tuple([
-        'compilation', 'preparation',
-        'validation', 'running',
-    ])
-    """Events will be emitted for the start and finish of each engine
-       activity defined above, the actual event name that can be registered
-       to subscribe to will be ``${event}_start`` and ``${event}_end`` where
-       the ``${event}`` in this pseudo-variable will be one of these events.
-
-       .. deprecated:: 1.23.0
-          Use :py:attr:`~EVENTS_EMITTED`
-    """
 
     EVENTS_EMITTED = tuple([
         'compilation_start', 'compilation_end',
@@ -142,13 +138,6 @@ class ExecutorConductor(base.Conductor):
 
         The method returns immediately regardless of whether the conductor has
         been stopped.
-
-        .. deprecated:: 0.8
-
-            The ``timeout`` parameter is **deprecated** and is present for
-            backward compatibility **only**. In order to wait for the
-            conductor to gracefully shut down, :py:meth:`wait` should be used
-            instead.
         """
         self._wait_timeout.interrupt()
 
@@ -177,11 +166,22 @@ class ExecutorConductor(base.Conductor):
                 'engine': engine,
                 'conductor': self,
             }
+
+            def _run_engine():
+                has_suspended = False
+                for _state in engine.run_iter():
+                    if not has_suspended and self._wait_timeout.is_stopped():
+                        self._log.info("Conductor stopped, requesting "
+                                       "suspension of engine running "
+                                       "job %s", job)
+                        engine.suspend()
+                        has_suspended = True
+
             try:
                 for stage_func, event_name in [(engine.compile, 'compilation'),
                                                (engine.prepare, 'preparation'),
                                                (engine.validate, 'validation'),
-                                               (engine.run, 'running')]:
+                                               (_run_engine, 'running')]:
                     self._notifier.notify("%s_start" % event_name,  details)
                     stage_func()
                     self._notifier.notify("%s_end" % event_name, details)
@@ -210,7 +210,11 @@ class ExecutorConductor(base.Conductor):
                     "Job execution failed (consumption proceeding): %s",
                     job, exc_info=True)
             else:
-                self._log.info("Job completed successfully: %s", job)
+                if engine.storage.get_flow_state() == states.SUSPENDED:
+                    self._log.info("Job execution was suspended: %s", job)
+                    consume = False
+                else:
+                    self._log.info("Job completed successfully: %s", job)
             return consume
 
     def _try_finish_job(self, job, consume):
@@ -274,10 +278,20 @@ class ExecutorConductor(base.Conductor):
             # Don't even do any work in the first place...
             if max_dispatches == 0:
                 raise StopIteration
+            fresh_period = timeutils.StopWatch(
+                duration=self.REFRESH_PERIODICITY)
+            fresh_period.start()
             while not is_stopped():
                 any_dispatched = False
-                for job in itertools.takewhile(self._can_claim_more_jobs,
-                                               self._jobboard.iterjobs()):
+                if fresh_period.expired():
+                    ensure_fresh = True
+                    fresh_period.restart()
+                else:
+                    ensure_fresh = False
+                job_it = itertools.takewhile(
+                    self._can_claim_more_jobs,
+                    self._jobboard.iterjobs(ensure_fresh=ensure_fresh))
+                for job in job_it:
                     self._log.debug("Trying to claim job: %s", job)
                     try:
                         self._jobboard.claim(job, self._name)

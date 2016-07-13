@@ -14,9 +14,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from concurrent import futures
 import weakref
 
 from automaton import machines
+from oslo_utils import timeutils
 
 from taskflow import logging
 from taskflow import states as st
@@ -42,6 +44,17 @@ SUCCESS = 'success'
 REVERTED = 'reverted'
 START = 'start'
 
+# Internal enums used to denote how/if a atom was completed."""
+FAILED_COMPLETING = 'failed_completing'
+WAS_CANCELLED = 'was_cancelled'
+SUCCESSFULLY_COMPLETED = 'successfully_completed'
+
+
+# For these states we will gather how long (in seconds) the
+# state was in-progress (cumulatively if the state is entered multiple
+# times)
+TIMED_STATES = (st.ANALYZING, st.RESUMING, st.SCHEDULING, st.WAITING)
+
 LOG = logging.getLogger(__name__)
 
 
@@ -53,6 +66,11 @@ class MachineMemory(object):
         self.not_done = set()
         self.failures = []
         self.done = set()
+
+    def cancel_futures(self):
+        """Attempts to cancel any not done futures."""
+        for fut in self.not_done:
+            fut.cancel()
 
 
 class MachineBuilder(object):
@@ -100,8 +118,20 @@ class MachineBuilder(object):
         self._storage = runtime.storage
         self._waiter = waiter
 
-    def build(self, timeout=None):
+    def build(self, statistics, timeout=None, gather_statistics=True):
         """Builds a state-machine (that is used during running)."""
+        if gather_statistics:
+            watches = {}
+            state_statistics = {}
+            statistics['seconds_per_state'] = state_statistics
+            watches = {}
+            for timed_state in TIMED_STATES:
+                state_statistics[timed_state.lower()] = 0.0
+                watches[timed_state] = timeutils.StopWatch()
+            statistics['discarded_failures'] = 0
+            statistics['awaiting'] = 0
+            statistics['completed'] = 0
+            statistics['incomplete'] = 0
 
         memory = MachineMemory()
         if timeout is None:
@@ -117,10 +147,6 @@ class MachineBuilder(object):
                 sorted(next_nodes,
                        key=lambda node: getattr(node, 'priority', 0),
                        reverse=True))
-
-        def is_runnable():
-            # Checks if the storage says the flow is still runnable...
-            return self._storage.get_flow_state() == st.RUNNING
 
         def iter_next_atoms(atom=None, apply_deciders=True):
             # Yields and filters and tweaks the next atoms to run...
@@ -173,13 +199,21 @@ class MachineBuilder(object):
             # if the user of this engine has requested the engine/storage
             # that holds this information to stop or suspend); handles failures
             # that occur during this process safely...
-            if is_runnable() and memory.next_up:
+            current_flow_state = self._storage.get_flow_state()
+            if current_flow_state == st.RUNNING and memory.next_up:
                 not_done, failures = do_schedule(memory.next_up)
                 if not_done:
                     memory.not_done.update(not_done)
                 if failures:
                     memory.failures.extend(failures)
                 memory.next_up.intersection_update(not_done)
+            elif current_flow_state == st.SUSPENDING and memory.not_done:
+                # Try to force anything not cancelled to now be cancelled
+                # so that the executor that gets it does not continue to
+                # try to work on it (if the future execution is still in
+                # its backlog, if it's already being executed, this will
+                # do nothing).
+                memory.cancel_futures()
             return WAIT
 
         def complete_an_atom(fut):
@@ -208,9 +242,23 @@ class MachineBuilder(object):
                                       " units request during completion of"
                                       " atom '%s' (intention is to %s)",
                                       result, outcome, atom, intention)
+                        if gather_statistics:
+                            statistics['discarded_failures'] += 1
+                if gather_statistics:
+                    statistics['completed'] += 1
+            except futures.CancelledError:
+                # Well it got cancelled, skip doing anything
+                # and move on; at a further time it will be resumed
+                # and something should be done with it to get it
+                # going again.
+                return WAS_CANCELLED
             except Exception:
                 memory.failures.append(failure.Failure())
-                LOG.exception("Engine '%s' atom post-completion failed", atom)
+                LOG.exception("Engine '%s' atom post-completion"
+                              " failed", atom)
+                return FAILED_COMPLETING
+            else:
+                return SUCCESSFULLY_COMPLETED
 
         def wait(old_state, new_state, event):
             # TODO(harlowja): maybe we should start doing 'yield from' this
@@ -234,8 +282,9 @@ class MachineBuilder(object):
                 # Force it to be completed so that we can ensure that
                 # before we iterate over any successors or predecessors
                 # that we know it has been completed and saved and so on...
-                complete_an_atom(fut)
-                if not memory.failures:
+                completion_status = complete_an_atom(fut)
+                if (not memory.failures
+                        and completion_status != WAS_CANCELLED):
                     atom = fut.atom
                     try:
                         more_work = set(iter_next_atoms(atom=atom))
@@ -245,40 +294,52 @@ class MachineBuilder(object):
                                       " next atom searching failed", atom)
                     else:
                         next_up.update(more_work)
-            if is_runnable() and next_up and not memory.failures:
+            current_flow_state = self._storage.get_flow_state()
+            if (current_flow_state == st.RUNNING
+                    and next_up and not memory.failures):
                 memory.next_up.update(next_up)
                 return SCHEDULE
             elif memory.not_done:
+                if current_flow_state == st.SUSPENDING:
+                    memory.cancel_futures()
                 return WAIT
             else:
                 return FINISH
 
         def on_exit(old_state, event):
-            LOG.debug("Exiting old state '%s' in response to event '%s'",
+            LOG.trace("Exiting old state '%s' in response to event '%s'",
                       old_state, event)
+            if gather_statistics:
+                if old_state in watches:
+                    w = watches[old_state]
+                    w.stop()
+                    state_statistics[old_state.lower()] += w.elapsed()
+                if old_state in (st.SCHEDULING, st.WAITING):
+                    statistics['incomplete'] = len(memory.not_done)
+                if old_state in (st.ANALYZING, st.SCHEDULING):
+                    statistics['awaiting'] = len(memory.next_up)
 
         def on_enter(new_state, event):
-            LOG.debug("Entering new state '%s' in response to event '%s'",
+            LOG.trace("Entering new state '%s' in response to event '%s'",
                       new_state, event)
+            if gather_statistics and new_state in watches:
+                watches[new_state].restart()
 
-        # NOTE(harlowja): when ran in trace mode it is quite useful
-        # to track the various state transitions as they happen...
-        watchers = {}
-        if LOG.isEnabledFor(logging.TRACE):
-            watchers['on_exit'] = on_exit
-            watchers['on_enter'] = on_enter
-
+        state_kwargs = {
+            'on_exit': on_exit,
+            'on_enter': on_enter,
+        }
         m = machines.FiniteMachine()
-        m.add_state(GAME_OVER, **watchers)
-        m.add_state(UNDEFINED, **watchers)
-        m.add_state(st.ANALYZING, **watchers)
-        m.add_state(st.RESUMING, **watchers)
-        m.add_state(st.REVERTED, terminal=True, **watchers)
-        m.add_state(st.SCHEDULING, **watchers)
-        m.add_state(st.SUCCESS, terminal=True, **watchers)
-        m.add_state(st.SUSPENDED, terminal=True, **watchers)
-        m.add_state(st.WAITING, **watchers)
-        m.add_state(st.FAILURE, terminal=True, **watchers)
+        m.add_state(GAME_OVER, **state_kwargs)
+        m.add_state(UNDEFINED, **state_kwargs)
+        m.add_state(st.ANALYZING, **state_kwargs)
+        m.add_state(st.RESUMING, **state_kwargs)
+        m.add_state(st.REVERTED, terminal=True, **state_kwargs)
+        m.add_state(st.SCHEDULING, **state_kwargs)
+        m.add_state(st.SUCCESS, terminal=True, **state_kwargs)
+        m.add_state(st.SUSPENDED, terminal=True, **state_kwargs)
+        m.add_state(st.WAITING, **state_kwargs)
+        m.add_state(st.FAILURE, terminal=True, **state_kwargs)
         m.default_start_state = UNDEFINED
 
         m.add_transition(GAME_OVER, st.REVERTED, REVERTED)

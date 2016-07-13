@@ -31,6 +31,10 @@ from taskflow.utils import misc
 _sequence_types = (list, tuple, collections.Sequence)
 _set_types = (set, collections.Set)
 
+# the default list of revert arguments to ignore when deriving
+# revert argument mapping from the revert method signature
+_default_revert_args = ('result', 'flow_failures')
+
 
 def _save_as_to_mapping(save_as):
     """Convert save_as to mapping name => index.
@@ -176,6 +180,17 @@ class Atom(object):
                    injected into the atoms scope before the atom execution
                    commences (this allows for providing atom *local* values
                    that do not need to be provided by other atoms/dependents).
+    :param rebind: A dict of key/value pairs used to define argument
+                   name conversions for inputs to this atom's ``execute``
+                   method.
+    :param revert_rebind: The same as ``rebind`` but for the ``revert``
+                          method. If unpassed, ``rebind`` will be used
+                          instead.
+    :param requires: A set or list of required inputs for this atom's
+                     ``execute`` method.
+    :param revert_requires: A set or list of required inputs for this atom's
+                            ``revert`` method. If unpassed, ```requires`` will
+                            be used.
     :ivar version: An *immutable* version that associates version information
                    with this atom. It can be useful in resuming older versions
                    of atoms. Standard major, minor versioning concepts
@@ -191,12 +206,17 @@ class Atom(object):
                   the names that this atom expects (in a way this is like
                   remapping a namespace of another atom into the namespace
                   of this atom).
+    :ivar revert_rebind: The same as ``rebind`` but for the revert method. This
+                         should only differ from ``rebind`` if the ``revert``
+                         method has a different signature from ``execute`` or
+                         a different ``revert_rebind`` value was received.
     :ivar inject: See parameter ``inject``.
     :ivar name: See parameter ``name``.
     :ivar requires: A :py:class:`~taskflow.types.sets.OrderedSet` of inputs
                     this atom requires to function.
     :ivar optional: A :py:class:`~taskflow.types.sets.OrderedSet` of inputs
-                    that are optional for this atom to function.
+                    that are optional for this atom to ``execute``.
+    :ivar revert_optional: The ``revert`` version of ``optional``.
     :ivar provides: A :py:class:`~taskflow.types.sets.OrderedSet` of outputs
                     this atom produces.
     """
@@ -228,18 +248,47 @@ class Atom(object):
     submission order).
     """
 
-    def __init__(self, name=None, provides=None, inject=None):
+    default_provides = None
+
+    def __init__(self, name=None, provides=None, requires=None,
+                 auto_extract=True, rebind=None, inject=None,
+                 ignore_list=None, revert_rebind=None, revert_requires=None):
+
+        if provides is None:
+            provides = self.default_provides
+
         self.name = name
         self.version = (1, 0)
         self.inject = inject
         self.save_as = _save_as_to_mapping(provides)
-        self.requires = sets.OrderedSet()
-        self.optional = sets.OrderedSet()
         self.provides = sets.OrderedSet(self.save_as)
-        self.rebind = collections.OrderedDict()
+
+        if ignore_list is None:
+            ignore_list = []
+
+        self.rebind, exec_requires, self.optional = self._build_arg_mapping(
+            self.execute,
+            requires=requires,
+            rebind=rebind, auto_extract=auto_extract,
+            ignore_list=ignore_list
+        )
+
+        revert_ignore = ignore_list + list(_default_revert_args)
+        revert_mapping = self._build_arg_mapping(
+            self.revert,
+            requires=revert_requires or requires,
+            rebind=revert_rebind or rebind,
+            auto_extract=auto_extract,
+            ignore_list=revert_ignore
+        )
+        (self.revert_rebind, addl_requires,
+         self.revert_optional) = revert_mapping
+
+        self.requires = exec_requires.union(addl_requires)
 
     def _build_arg_mapping(self, executor, requires=None, rebind=None,
                            auto_extract=True, ignore_list=None):
+
         required, optional = _build_arg_mapping(self.name, requires, rebind,
                                                 executor, auto_extract,
                                                 ignore_list=ignore_list)
@@ -250,21 +299,84 @@ class Atom(object):
         for (arg_name, bound_name) in itertools.chain(six.iteritems(required),
                                                       six.iteritems(optional)):
             rebind.setdefault(arg_name, bound_name)
-        self.rebind = rebind
-        self.requires = sets.OrderedSet(six.itervalues(required))
-        self.optional = sets.OrderedSet(six.itervalues(optional))
+        requires = sets.OrderedSet(six.itervalues(required))
+        optional = sets.OrderedSet(six.itervalues(optional))
         if self.inject:
             inject_keys = frozenset(six.iterkeys(self.inject))
-            self.requires -= inject_keys
-            self.optional -= inject_keys
+            requires -= inject_keys
+            optional -= inject_keys
+        return rebind, requires, optional
+
+    def pre_execute(self):
+        """Code to be run prior to executing the atom.
+
+        A common pattern for initializing the state of the system prior to
+        running atoms is to define some code in a base class that all your
+        atoms inherit from.  In that class, you can define a ``pre_execute``
+        method and it will always be invoked just prior to your atoms running.
+        """
 
     @abc.abstractmethod
     def execute(self, *args, **kwargs):
-        """Executes this atom."""
+        """Activate a given atom which will perform some operation and return.
 
-    @abc.abstractmethod
+        This method can be used to perform an action on a given set of input
+        requirements (passed in via ``*args`` and ``**kwargs``) to accomplish
+        some type of operation. This operation may provide some named
+        outputs/results as a result of it executing for later reverting (or for
+        other atoms to depend on).
+
+        NOTE(harlowja): the result (if any) that is returned should be
+        persistable so that it can be passed back into this atom if
+        reverting is triggered (especially in the case where reverting
+        happens in a different python process or on a remote machine) and so
+        that the result can be transmitted to other atoms (which may be local
+        or remote).
+
+        :param args: positional arguments that atom requires to execute.
+        :param kwargs: any keyword arguments that atom requires to execute.
+        """
+
+    def post_execute(self):
+        """Code to be run after executing the atom.
+
+        A common pattern for cleaning up global state of the system after the
+        execution of atoms is to define some code in a base class that all your
+        atoms inherit from.  In that class, you can define a ``post_execute``
+        method and it will always be invoked just after your atoms execute,
+        regardless of whether they succeeded or not.
+
+        This pattern is useful if you have global shared database sessions
+        that need to be cleaned up, for example.
+        """
+
+    def pre_revert(self):
+        """Code to be run prior to reverting the atom.
+
+        This works the same as :meth:`.pre_execute`, but for the revert phase.
+        """
+
     def revert(self, *args, **kwargs):
-        """Reverts this atom (undoing any :meth:`execute` side-effects)."""
+        """Revert this atom.
+
+        This method should undo any side-effects caused by previous execution
+        of the atom using the result of the :py:meth:`execute` method and
+        information on the failure which triggered reversion of the flow the
+        atom is contained in (if applicable).
+
+        :param args: positional arguments that the atom required to execute.
+        :param kwargs: any keyword arguments that the atom required to
+                       execute; the special key ``'result'`` will contain
+                       the :py:meth:`execute` result (if any) and
+                       the ``**kwargs`` key ``'flow_failures'`` will contain
+                       any failure information.
+        """
+
+    def post_revert(self):
+        """Code to be run after reverting the atom.
+
+        This works the same as :meth:`.post_execute`, but for the revert phase.
+        """
 
     def __str__(self):
         return "%s==%s" % (self.name, misc.get_version_string(self))
