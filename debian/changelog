@@ -1,4 +1,4 @@
-python-taskflow (2.2.0-1) experimental; urgency=medium
+python-taskflow (2.3.0-1) experimental; urgency=medium
 
   [ Ondřej Nový ]
   * Standards-Version is 3.9.8 now (no change)
