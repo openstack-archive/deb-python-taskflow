@@ -1,0 +1,10 @@
+Code-Review+2: Min Pae <min.pae@hp.com>
+Code-Review+1: Rushi Agrawal <rushi.openstack@gmail.com>
+Code-Review+2: Greg Hill <greg.hill@rackspace.com>
+Workflow+1: Greg Hill <greg.hill@rackspace.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Mon, 25 Jul 2016 16:37:39 +0000
+Reviewed-on: https://review.openstack.org/293075
+Project: openstack/deb-python-taskflow
+Branch: refs/heads/master

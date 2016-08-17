@@ -1,0 +1,10 @@
+Code-Review+1: yuyafei <yu.yafei@hotmail.com>
+Code-Review+2: Joshua Harlow <jxharlow@godaddy.com>
+Code-Review+2: Greg Hill <greg.hill@rackspace.com>
+Workflow+1: Greg Hill <greg.hill@rackspace.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Thu, 21 Jul 2016 21:03:14 +0000
+Reviewed-on: https://review.openstack.org/342665
+Project: openstack/deb-python-taskflow
+Branch: refs/heads/master
