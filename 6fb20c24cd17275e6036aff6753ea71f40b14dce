@@ -1,0 +1,8 @@
+Code-Review+2: Doug Hellmann <doug@doughellmann.com>
+Workflow+1: Doug Hellmann <doug@doughellmann.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Sat, 21 Jan 2017 01:29:08 +0000
+Reviewed-on: https://review.openstack.org/423490
+Project: openstack/deb-python-taskflow
+Branch: refs/heads/stable/ocata
