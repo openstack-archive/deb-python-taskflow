@@ -1,0 +1,8 @@
+Code-Review+2: Joshua Harlow <jxharlow@godaddy.com>
+Workflow+1: ChangBo Guo(gcb) <glongwave@gmail.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Fri, 05 May 2017 03:47:37 +0000
+Reviewed-on: https://review.openstack.org/460966
+Project: openstack/deb-python-taskflow
+Branch: refs/heads/master
