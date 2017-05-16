@@ -1,0 +1,8 @@
+Code-Review+2: Joshua Harlow <jxharlow@godaddy.com>
+Workflow+1: Joshua Harlow <jxharlow@godaddy.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Tue, 16 May 2017 19:17:14 +0000
+Reviewed-on: https://review.openstack.org/464890
+Project: openstack/deb-python-taskflow
+Branch: refs/heads/stable/ocata
